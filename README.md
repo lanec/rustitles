@@ -8,7 +8,7 @@ Rustitles will scan a given folder and automatically download subtitles in the s
 ## How to install
 
 - Download and install the latest version of [Microsoft Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-- Download the latest release of Rustitles
+- Download the [latest release](https://github.com/fosterbarnes/rustitles/releases/download/v1.0.0/rustitles.exe) of Rustitles
 - Save rustitles.exe somewhere memorable, or just run it from your downloads folder.
 
 ## How do I use it?
