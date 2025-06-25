@@ -13,7 +13,7 @@ Rustitles will scan a given folder and automatically download subtitles in the s
 
 ## How do I use it?
 
-- Once opening, click "Install Python" if you do not have Python installed (only required on first run)
+- Once open, click "Install Python" if you do not have Python installed (only required on first run)
 - Follow the on screen prompts & wait for Rustitles to install Python and Subliminal (this only happens on the first run of Rustitles)
 - Select your desired language(s)
 - Set your maximum concurrent downloads or leave this number as default. This is the amount of subtitles that will be downloaded at the same time. (More concurrent downloads = more Python processes = more RAM used)
@@ -36,3 +36,31 @@ Rustitles will automatically install Python & Subliminal, but if you'd prefer to
 ```pip install subliminal``` . Aditionally, make sure the latest version of Microsoft Visual C++ Redistributable is installed. Once this is done, Rustitles is ready to go.
 
 If you are unaware of Subliminal, it is a command line tool that uses python to find and download subtitles. If you prefer a CLI, just use Subliminal.
+
+## Antivirus False Positives
+
+I've tested for Windows Defender false postives in a virtual machine, and nothing was detected. However, any app that is not codesigned has a chance of tripping your antivirus (codesigning is very, very expensive). If this happens, add "rustitles.exe" or the folder therein as an exclusion for your antivirus. 
+
+[How to set exclusions for Windows Defender](https://www.elevenforum.com/t/add-or-remove-exclusions-for-microsoft-defender-antivirus-in-windows-11.8797/#One)
+
+[Virustotal scan of Rustitles](https://www.virustotal.com/gui/file/cc05fb32c293f71eeb30d898000add1a51e5e1a9d2c5fa94b119bba32c1fecf2?nocache=1)
+
+## Building/Compiling
+
+If you'd prefer to build the `.exe` yourself: 
+- Download [Visual Studio Community Installer](https://visualstudio.microsoft.com/downloads/) and select "Desktop development with C++" in the installer.
+- Download and install [Rust](https://www.rust-lang.org/tools/install)
+- Clone or [download](https://github.com/fosterbarnes/rustitles/archive/refs/heads/main.zip) this repository. (Unzip if you used this download link)
+- Open Command Prompt or Powershell
+- cd to rustitles-main e.g. ```cd "C:\Users\Foster\Downloads\rustitles-main\rustitles-main"```
+- enter ```cargo build --release```
+- You'll find your newly built .exe at `\rustitles-main\target\release\rustitles.exe`
+
+Without any changes to `\src\main.rs` or `Cargo.toml` this .exe will be identical to the one I've provided. Just leaving this method here in case anyone feels more comfortable building themselves, or wants to tinker and make some changes.
+
+## Support
+
+If you have any issues, create an issue from the [Issues](https://github.com/fosterbarnes/rustitles/issues) tab and I will get back to you as quickly as possible.
+
+If you'd like to support me, follow me on twitch:
+https://www.twitch.tv/fosterbarnes
