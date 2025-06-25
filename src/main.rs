@@ -260,7 +260,7 @@ struct DownloadJob {
     status: JobStatus,
 }
 
-struct SubtitleApp {
+struct SubtitleDownloader {
     downloads_completed: usize,
     total_downloads: usize,
     is_downloading: bool,
@@ -285,7 +285,7 @@ struct SubtitleApp {
     concurrent_downloads: usize,
 }
 
-impl Default for SubtitleApp {
+impl Default for SubtitleDownloader {
     fn default() -> Self {
         let python_version = python_version();
         let python_installed = python_version.is_some();
@@ -345,7 +345,7 @@ impl Default for SubtitleApp {
     }
 }
 
-impl SubtitleApp {
+impl SubtitleDownloader {
     fn video_missing_subtitle(video_path: &Path, selected_languages: &[String]) -> bool {
         if let Some(stem) = video_path.file_stem().and_then(|s| s.to_str()) {
             let folder = video_path.parent().unwrap_or_else(|| Path::new(""));
@@ -401,7 +401,7 @@ impl SubtitleApp {
         let folder_path = self.folder_path.clone();
         let selected_languages = self.selected_languages.clone();
 
-        // Clear download jobs since folder changed
+        // Clear download jobs when folder changes
         {
             let mut jobs = self.download_jobs.lock().unwrap();
             jobs.clear();
@@ -432,7 +432,7 @@ impl SubtitleApp {
             visit_dirs(Path::new(&folder_path), &mut found_videos);
 
             for video in &found_videos {
-                if SubtitleApp::video_missing_subtitle(video, &selected_languages) {
+                if SubtitleDownloader::video_missing_subtitle(video, &selected_languages) {
                     missing_subtitles.push(video.clone());
                 }
             }
@@ -535,7 +535,7 @@ impl SubtitleApp {
                             args.push(lang);
                         }
                         
-                        // Try multiple ways to run subliminal
+                        // Run subliminal with multiple failsafes
                         let mut all_args = args.clone();
                         all_args.push(job_path.to_str().unwrap());
                         
@@ -631,9 +631,9 @@ impl SubtitleApp {
 }
 
 // =========================
-// === eframe::App Implementation
+// === eframe::GUI Implementation
 // =========================
-impl eframe::App for SubtitleApp {
+impl eframe::App for SubtitleDownloader {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Check download completion
         self.check_download_completion();
@@ -696,7 +696,7 @@ impl eframe::App for SubtitleApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Custom Dracula heading - larger text
+            // Heading with Dracula colors
             ui.heading(egui::RichText::new("Rustitles - Subtitle Downloader Tool").color(egui::Color32::from_rgb(189, 147, 249)));
             ui.add_space(5.0);
 
@@ -868,7 +868,7 @@ impl eframe::App for SubtitleApp {
                         ui.add_space(10.0);
                         ui.label(format!("Progress: {} / {} downloads", self.downloads_completed, self.total_downloads));
                         
-                        // Custom darker progress bar
+                        // Progress bar Dracual colors
                         let progress_bar = egui::ProgressBar::new(progress)
                             .show_percentage()
                             .fill(egui::Color32::from_rgb(124, 99, 160)) // #7c63a0
@@ -983,7 +983,7 @@ fn main() {
             
             cc.egui_ctx.set_visuals(visuals);
             
-            Box::new(SubtitleApp::default())
+            Box::new(SubtitleDownloader::default())
         }),
     ).expect("Failed to start eframe");
 }
