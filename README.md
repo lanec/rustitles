@@ -1,7 +1,7 @@
 
 # Rustitles - A Subtitle Downloader Tool
 
-Rustitles will scan a given folder and automatically download subtitles in the selected language(s). It will scan recursively in the given folder for all video files, if missing subtitles are found, it will download them. This is built with media servers in mind, so if you have a large library of movies/tv-shows, just select the root folder used for your media server and wait for it to complete. This is a portable application.
+Rustitles will scan a given folder and automatically download subtitles in the selected language(s). It will scan recursively in the given folder for all video files, if missing subtitles are found, it will download them. This is built with media servers in mind, so if you have a large library of movies/tv-shows, just select the root folder used for your media server and wait for it to complete. This is a portable Windows application.
 
 ![rustitles_woHCspsmUA](https://github.com/user-attachments/assets/99a76449-a243-4dc3-a32f-4d87ab5ef63f)
 
