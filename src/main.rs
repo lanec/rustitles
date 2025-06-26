@@ -252,6 +252,7 @@ enum JobStatus {
     Pending,
     Running,
     Success,
+    EmbeddedExists(String), // full language name
     Failed(String),
 }
 
@@ -562,10 +563,19 @@ impl SubtitleDownloader {
 
                         match output {
                             Ok(out) if out.status.success() => {
-                                // After success, try to find the new subtitle file
+                                let stdout_str = String::from_utf8_lossy(&out.stdout).to_lowercase();
+                                let stderr_str = String::from_utf8_lossy(&out.stderr).to_lowercase();
+                                let combined_output = format!("{}\n{}", stdout_str, stderr_str);
                                 let subtitle_path = find_subtitle_file(&job_path, &langs_clone);
                                 if let Some(job) = job_opt {
-                                    job.status = JobStatus::Success;
+                                    if combined_output.contains("downloaded 0 subtitle") {
+                                        // Assume embedded subtitles exist for the requested language(s)
+                                        let lang_code = langs_clone.get(0).cloned().unwrap_or_else(|| "unknown".to_string());
+                                        let lang_name = language_code_to_name(&lang_code).to_string();
+                                        job.status = JobStatus::EmbeddedExists(lang_name);
+                                    } else {
+                                        job.status = JobStatus::Success;
+                                    }
                                     job.subtitle_path = subtitle_path;
                                 }
                             }
@@ -608,7 +618,7 @@ impl SubtitleDownloader {
 
         // Update progress in real-time
         let jobs = self.download_jobs.lock().unwrap();
-        let success_count = jobs.iter().filter(|j| j.status == JobStatus::Success).count();
+        let success_count = jobs.iter().filter(|j| j.status == JobStatus::Success || matches!(j.status, JobStatus::EmbeddedExists(_))).count();
         let running_count = jobs.iter().filter(|j| j.status == JobStatus::Running).count();
         self.downloads_completed = success_count;
 
@@ -620,8 +630,9 @@ impl SubtitleDownloader {
                 
                 // Count completed jobs
                 let failed_count = jobs.iter().filter(|j| matches!(j.status, JobStatus::Failed(_))).count();
+                let success_count = jobs.iter().filter(|j| j.status == JobStatus::Success || matches!(j.status, JobStatus::EmbeddedExists(_))).count();
                 
-                self.status = format!("Downloads completed: {} successful, {} failed", success_count, failed_count);
+                self.status = format!("Subtitle jobs completed: {} successful, {} failed", success_count, failed_count);
                 self.is_downloading = false;
             } else {
                 // Update status while downloading
@@ -656,6 +667,36 @@ fn find_subtitle_file(video_path: &Path, langs: &[String]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+// Add this helper function for language code to name
+fn language_code_to_name(code: &str) -> &str {
+    match code {
+        "en" => "English",
+        "fr" => "French",
+        "es" => "Spanish",
+        "de" => "German",
+        "it" => "Italian",
+        "pt" => "Portuguese",
+        "nl" => "Dutch",
+        "pl" => "Polish",
+        "ru" => "Russian",
+        "sv" => "Swedish",
+        "fi" => "Finnish",
+        "da" => "Danish",
+        "no" => "Norwegian",
+        "cs" => "Czech",
+        "hu" => "Hungarian",
+        "ro" => "Romanian",
+        "he" => "Hebrew",
+        "ar" => "Arabic",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "zh" => "Chinese",
+        "zh-cn" => "Chinese (Simplified)",
+        "zh-tw" => "Chinese (Traditional)",
+        _ => code,
+    }
 }
 
 // =========================
@@ -859,7 +900,7 @@ impl eframe::App for SubtitleDownloader {
                 // Show download jobs status
                 let jobs = self.download_jobs.lock().unwrap();
                 if !jobs.is_empty() {
-                    ui.label("Download Jobs:");
+                    ui.label("Subtitle Jobs:");
                     ui.separator();
                     egui::ScrollArea::vertical()
                         .max_height(200.0)
@@ -873,6 +914,7 @@ impl eframe::App for SubtitleDownloader {
                                     JobStatus::Pending => ("Pending".to_string(), Some(egui::Color32::from_rgb(241, 250, 140))), // yellow
                                     JobStatus::Running => ("Running".to_string(), Some(egui::Color32::from_rgb(189, 147, 249))), // lighter purple
                                     JobStatus::Success => ("Success".to_string(), Some(egui::Color32::from_rgb(80, 250, 123))), // green
+                                    JobStatus::EmbeddedExists(lang) => (format!("Embedded {} subtitles already exist", lang), Some(egui::Color32::from_rgb(255, 184, 108))), // orange
                                     JobStatus::Failed(err) => (format!("Failed: {}", err), Some(egui::Color32::from_rgb(255, 85, 85))), // red
                                 };
                                 ui.horizontal(|ui| {
@@ -940,7 +982,7 @@ impl eframe::App for SubtitleDownloader {
                 if self.is_downloading || (!self.downloading && self.total_downloads > 0) {
                     if self.total_downloads > 0 {
                         ui.add_space(10.0);
-                        ui.label(format!("Progress: {} / {} downloads", self.downloads_completed, self.total_downloads));
+                        ui.label(format!("Progress: {} / {}", self.downloads_completed, self.total_downloads));
                     }
                 }
                 // Place the progress bar here, outside the ScrollArea. always fit the window
@@ -950,7 +992,7 @@ impl eframe::App for SubtitleDownloader {
                     let progress_bar = egui::ProgressBar::new(progress)
                         .show_percentage()
                         .fill(egui::Color32::from_rgb(124, 99, 160)) // #7c63a0
-                        .desired_width(window_width - 18.0); // Always fits window, with margin
+                        .desired_width(window_width - 18.0);
                     ui.add(progress_bar);
                 }
             } else {
