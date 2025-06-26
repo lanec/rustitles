@@ -259,7 +259,7 @@ enum JobStatus {
 struct DownloadJob {
     video_path: PathBuf,
     status: JobStatus,
-    subtitle_path: Option<PathBuf>,
+    subtitle_paths: Vec<PathBuf>,
 }
 
 struct SubtitleDownloader {
@@ -275,6 +275,8 @@ struct SubtitleDownloader {
     python_install_result: Arc<Mutex<Option<Result<(), String>>>>,
     subliminal_install_result: Arc<Mutex<Option<Result<(), String>>>>,
     selected_languages: Vec<String>,
+    force_download: bool,
+    overwrite_existing: bool,
     folder_path: String,
     scanned_videos: Arc<Mutex<Vec<PathBuf>>>,
     videos_missing_subs: Arc<Mutex<Vec<PathBuf>>>,
@@ -333,6 +335,8 @@ impl Default for SubtitleDownloader {
             python_install_result: Arc::new(Mutex::new(None)),
             subliminal_install_result,
             selected_languages: vec![],
+            force_download: false,
+            overwrite_existing: false,
             folder_path: String::new(),
             scanned_videos: Arc::new(Mutex::new(Vec::new())),
             videos_missing_subs: Arc::new(Mutex::new(Vec::new())),
@@ -402,6 +406,7 @@ impl SubtitleDownloader {
         let videos_missing_subs = Arc::clone(&self.videos_missing_subs);
         let folder_path = self.folder_path.clone();
         let selected_languages = self.selected_languages.clone();
+        let overwrite_existing = self.overwrite_existing;
 
         // Clear download jobs when folder changes
         {
@@ -433,9 +438,15 @@ impl SubtitleDownloader {
 
             visit_dirs(Path::new(&folder_path), &mut found_videos);
 
-            for video in &found_videos {
-                if SubtitleDownloader::video_missing_subtitle(video, &selected_languages) {
-                    missing_subtitles.push(video.clone());
+            if overwrite_existing {
+                // If overwrite is enabled, include all videos regardless of existing subtitles
+                missing_subtitles = found_videos.clone();
+            } else {
+                // Only include videos that are missing subtitles
+                for video in &found_videos {
+                    if SubtitleDownloader::video_missing_subtitle(video, &selected_languages) {
+                        missing_subtitles.push(video.clone());
+                    }
                 }
             }
 
@@ -465,7 +476,7 @@ impl SubtitleDownloader {
 
         let langs = self.selected_languages.clone();
         let jobs: Vec<_> = videos_missing.into_iter()
-            .map(|video_path| DownloadJob { video_path, status: JobStatus::Pending, subtitle_path: None })
+            .map(|video_path| DownloadJob { video_path, status: JobStatus::Pending, subtitle_paths: Vec::new() })
             .collect();
 
         self.total_downloads = jobs.len();
@@ -477,6 +488,8 @@ impl SubtitleDownloader {
         let cancel_flag = Arc::clone(&self.cancel_flag);
         let jobs_arc = Arc::clone(&self.download_jobs);
         let max_concurrent = self.concurrent_downloads;
+        let force_download = self.force_download;
+        let overwrite_existing = self.overwrite_existing;
 
         self.download_thread_handle = Some(thread::spawn(move || {
             let mut pending_indexes: VecDeque<usize> = (0..jobs_arc.lock().unwrap().len()).collect();
@@ -532,6 +545,12 @@ impl SubtitleDownloader {
                         
                         // Build command arguments with multiple -l flags for each language
                         let mut args = vec!["download"];
+                        if force_download {
+                            args.push("--force");
+                        }
+                        if overwrite_existing {
+                            args.push("--force");
+                        }
                         for lang in &langs_clone {
                             args.push("-l");
                             args.push(lang);
@@ -566,7 +585,7 @@ impl SubtitleDownloader {
                                 let stdout_str = String::from_utf8_lossy(&out.stdout).to_lowercase();
                                 let stderr_str = String::from_utf8_lossy(&out.stderr).to_lowercase();
                                 let combined_output = format!("{}\n{}", stdout_str, stderr_str);
-                                let subtitle_path = find_subtitle_file(&job_path, &langs_clone);
+                                let subtitle_paths = find_all_subtitle_files(&job_path, &langs_clone);
                                 if let Some(job) = job_opt {
                                     if combined_output.contains("downloaded 0 subtitle") {
                                         // Assume embedded subtitles exist for the requested language(s)
@@ -576,7 +595,7 @@ impl SubtitleDownloader {
                                     } else {
                                         job.status = JobStatus::Success;
                                     }
-                                    job.subtitle_path = subtitle_path;
+                                    job.subtitle_paths = subtitle_paths;
                                 }
                             }
                             Ok(out) => {
@@ -645,17 +664,26 @@ impl SubtitleDownloader {
     }
 }
 
-// Add this utility function to find the subtitle file for a video and language(s)
-fn find_subtitle_file(video_path: &Path, langs: &[String]) -> Option<PathBuf> {
-    let folder = video_path.parent()?;
-    let stem = video_path.file_stem()?.to_str()?;
+// Update the function to find all subtitle files for all languages
+fn find_all_subtitle_files(video_path: &Path, langs: &[String]) -> Vec<PathBuf> {
+    let folder = match video_path.parent() {
+        Some(f) => f,
+        None => return Vec::new(),
+    };
+    let stem = match video_path.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
     let subtitle_extensions = ["srt", "sub", "ssa", "ass", "vtt"];
+    let mut found_subtitles = Vec::new();
+    
     // Try language-specific first
     for lang in langs {
         for ext in &subtitle_extensions {
             let candidate = folder.join(format!("{}.{}.{}", stem, lang, ext));
             if candidate.exists() {
-                return Some(candidate);
+                found_subtitles.push(candidate);
+                break; // Found one for this language, move to next
             }
         }
     }
@@ -663,10 +691,11 @@ fn find_subtitle_file(video_path: &Path, langs: &[String]) -> Option<PathBuf> {
     for ext in &subtitle_extensions {
         let candidate = folder.join(format!("{}.{}", stem, ext));
         if candidate.exists() {
-            return Some(candidate);
+            found_subtitles.push(candidate);
+            break; // Found one generic, stop
         }
     }
-    None
+    found_subtitles
 }
 
 // Add this helper function for language code to name
@@ -838,25 +867,36 @@ impl eframe::App for SubtitleDownloader {
                     ("zh", "Chinese"), ("zh-cn", "Chinese (Simplified)"), ("zh-tw", "Chinese (Traditional)")
                 ];
 
-                egui::ComboBox::from_label("Select Languages")
-                    .selected_text(self.selected_languages.join(", "))
-                    .show_ui(ui, |ui| {
-                        for (code, name) in &language_list {
-                            let mut selected = self.selected_languages.contains(&code.to_string());
-                            if ui.checkbox(&mut selected, *name).changed() {
-                                if selected {
-                                    self.selected_languages.push(code.to_string());
-                                } else {
-                                    self.selected_languages.retain(|c| c != code);
-                                }
-                                
-                                // Re-scan for missing subtitles when languages change
-                                if !self.folder_path.is_empty() {
-                                    self.scan_folder();
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_label("Select Languages")
+                        .selected_text(self.selected_languages.join(", "))
+                        .show_ui(ui, |ui| {
+                            for (code, name) in &language_list {
+                                let mut selected = self.selected_languages.contains(&code.to_string());
+                                if ui.checkbox(&mut selected, *name).changed() {
+                                    if selected {
+                                        self.selected_languages.push(code.to_string());
+                                    } else {
+                                        self.selected_languages.retain(|c| c != code);
+                                    }
+                                    
+                                    // Re-scan for missing subtitles when languages change
+                                    if !self.folder_path.is_empty() {
+                                        self.scan_folder();
+                                    }
                                 }
                             }
+                        });
+
+                    ui.checkbox(&mut self.force_download, "Ignore Embedded Subtitles");
+                    ui.add_space(0.0);
+                    if ui.checkbox(&mut self.overwrite_existing, "Overwrite Existing Subtitles").changed() {
+                        // Re-scan for missing subtitles when overwrite option changes
+                        if !self.folder_path.is_empty() {
+                            self.scan_folder();
                         }
-                    });
+                    }
+                });
 
                 ui.separator();
 
@@ -894,7 +934,11 @@ impl eframe::App for SubtitleDownloader {
                     let scanned_count = self.scanned_videos.lock().unwrap().len();
                     let missing_count = self.videos_missing_subs.lock().unwrap().len();
                     ui.label(format!("Found videos: {}", scanned_count));
-                    ui.label(format!("Videos missing subtitles: {}", missing_count));
+                    if self.overwrite_existing {
+                        ui.label(format!("Overwriting {} Subtitles", missing_count));
+                    } else {
+                        ui.label(format!("Videos missing subtitles: {}", missing_count));
+                    }
                 }
 
                 // Show download jobs status
@@ -902,8 +946,15 @@ impl eframe::App for SubtitleDownloader {
                 if !jobs.is_empty() {
                     ui.label("Subtitle Jobs:");
                     ui.separator();
+                    
+                    // Calculate available height for the scroll area
+                    // Reserve space for: status label, progress label, progress bar, and some padding
+                    let reserved_height = 80.0; // Approximate space needed for bottom elements
+                    let available_height = ui.available_height() - reserved_height;
+                    let scroll_height = available_height.max(200.0); // Minimum height of 200px (previous default)
+                    
                     egui::ScrollArea::vertical()
-                        .max_height(200.0)
+                        .max_height(scroll_height)
                         .show(ui, |ui| {
                             // Set a fixed width to ensure consistent scroll bar positioning
                             let available_width = ui.available_width();
@@ -917,17 +968,23 @@ impl eframe::App for SubtitleDownloader {
                                     JobStatus::EmbeddedExists(lang) => (format!("Embedded {} subtitles already exist", lang), Some(egui::Color32::from_rgb(255, 184, 108))), // orange
                                     JobStatus::Failed(err) => (format!("Failed: {}", err), Some(egui::Color32::from_rgb(255, 85, 85))), // red
                                 };
+                                // Video name and status on first line
                                 ui.horizontal(|ui| {
                                     ui.label(job.video_path.file_name().unwrap_or_default().to_string_lossy());
                                     match status_color {
                                         Some(color) => ui.label(egui::RichText::new(format!(" - {}", status_text)).color(color)),
                                         None => ui.label(format!(" - {}", status_text)),
                                     };
-                                    if let Some(sub_path) = &job.subtitle_path {
+                                });
+                                
+                                // Subtitle path on second line (indented)
+                                for sub_path in &job.subtitle_paths {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(20.0); // Indent the subtitle path
                                         let path_str = sub_path.display().to_string();
                                         let hyperlink_resp = ui.add(
                                             egui::Label::new(
-                                                egui::RichText::new(format!("  [{}]", path_str))
+                                                egui::RichText::new(format!("📄 {}", path_str))
                                                     .color(egui::Color32::from_rgb(248, 248, 242)) // white
                                             )
                                             .sense(egui::Sense::click())
@@ -966,8 +1023,8 @@ impl eframe::App for SubtitleDownloader {
                                                     .spawn();
                                             }
                                         }
-                                    }
-                                });
+                                    });
+                                }
                             }
                         });
                 }
@@ -1068,7 +1125,8 @@ fn main() {
         .with_inner_size(window_size)
         .with_position(center_pos)
         .with_decorations(true)
-        .with_resizable(true);
+        .with_resizable(true)
+        .with_min_inner_size([600.0, 461.0]); // Minimum window size to prevent UI elements from disappearing
     
     if let Some(icon) = icon_data {
         viewport_builder = viewport_builder.with_icon(icon);
