@@ -841,15 +841,18 @@ impl eframe::App for SubtitleDownloader {
                             ui.set_width(available_width - 20.0); // Reserve space for scroll bar
                             
                             for job in jobs.iter() {
-                                let status_text = match &job.status {
-                                    JobStatus::Pending => "Pending".to_string(),
-                                    JobStatus::Running => "Running".to_string(),
-                                    JobStatus::Success => "Success".to_string(),
-                                    JobStatus::Failed(err) => format!("Failed: {}", err),
+                                let (status_text, status_color) = match &job.status {
+                                    JobStatus::Pending => ("Pending".to_string(), Some(egui::Color32::from_rgb(241, 250, 140))), // yellow
+                                    JobStatus::Running => ("Running".to_string(), Some(egui::Color32::from_rgb(189, 147, 249))), // lighter purple
+                                    JobStatus::Success => ("Success".to_string(), Some(egui::Color32::from_rgb(80, 250, 123))), // green
+                                    JobStatus::Failed(err) => (format!("Failed: {}", err), Some(egui::Color32::from_rgb(255, 85, 85))), // red
                                 };
                                 ui.horizontal(|ui| {
                                     ui.label(job.video_path.file_name().unwrap_or_default().to_string_lossy());
-                                    ui.label(format!(" - {}", status_text));
+                                    match status_color {
+                                        Some(color) => ui.label(egui::RichText::new(format!(" - {}", status_text)).color(color)),
+                                        None => ui.label(format!(" - {}", status_text)),
+                                    };
                                 });
                             }
                         });
@@ -864,17 +867,19 @@ impl eframe::App for SubtitleDownloader {
                 // Show progress bar only when downloads are active or complete
                 if self.is_downloading || (!self.downloading && self.total_downloads > 0) {
                     if self.total_downloads > 0 {
-                        let progress = self.downloads_completed as f32 / self.total_downloads as f32;
                         ui.add_space(10.0);
                         ui.label(format!("Progress: {} / {} downloads", self.downloads_completed, self.total_downloads));
-                        
-                        // Progress bar Dracual colors
-                        let progress_bar = egui::ProgressBar::new(progress)
-                            .show_percentage()
-                            .fill(egui::Color32::from_rgb(124, 99, 160)) // #7c63a0
-                            .desired_width(ui.available_width());
-                        ui.add(progress_bar);
                     }
+                }
+                // Place the progress bar here, outside the ScrollArea. always fit the window
+                if (self.is_downloading || (!self.downloading && self.total_downloads > 0)) && self.total_downloads > 0 {
+                    let progress = self.downloads_completed as f32 / self.total_downloads as f32;
+                    let window_width = ui.ctx().screen_rect().width();
+                    let progress_bar = egui::ProgressBar::new(progress)
+                        .show_percentage()
+                        .fill(egui::Color32::from_rgb(124, 99, 160)) // #7c63a0
+                        .desired_width(window_width - 18.0); // Always fits window, with margin
+                    ui.add(progress_bar);
                 }
             } else {
                 // Show message when subliminal is not installed
