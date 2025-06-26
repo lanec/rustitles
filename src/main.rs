@@ -258,6 +258,7 @@ enum JobStatus {
 struct DownloadJob {
     video_path: PathBuf,
     status: JobStatus,
+    subtitle_path: Option<PathBuf>,
 }
 
 struct SubtitleDownloader {
@@ -463,7 +464,7 @@ impl SubtitleDownloader {
 
         let langs = self.selected_languages.clone();
         let jobs: Vec<_> = videos_missing.into_iter()
-            .map(|video_path| DownloadJob { video_path, status: JobStatus::Pending })
+            .map(|video_path| DownloadJob { video_path, status: JobStatus::Pending, subtitle_path: None })
             .collect();
 
         self.total_downloads = jobs.len();
@@ -561,8 +562,11 @@ impl SubtitleDownloader {
 
                         match output {
                             Ok(out) if out.status.success() => {
+                                // After success, try to find the new subtitle file
+                                let subtitle_path = find_subtitle_file(&job_path, &langs_clone);
                                 if let Some(job) = job_opt {
                                     job.status = JobStatus::Success;
+                                    job.subtitle_path = subtitle_path;
                                 }
                             }
                             Ok(out) => {
@@ -628,6 +632,30 @@ impl SubtitleDownloader {
             }
         }
     }
+}
+
+// Add this utility function to find the subtitle file for a video and language(s)
+fn find_subtitle_file(video_path: &Path, langs: &[String]) -> Option<PathBuf> {
+    let folder = video_path.parent()?;
+    let stem = video_path.file_stem()?.to_str()?;
+    let subtitle_extensions = ["srt", "sub", "ssa", "ass", "vtt"];
+    // Try language-specific first
+    for lang in langs {
+        for ext in &subtitle_extensions {
+            let candidate = folder.join(format!("{}.{}.{}", stem, lang, ext));
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    // Then try generic
+    for ext in &subtitle_extensions {
+        let candidate = folder.join(format!("{}.{}", stem, ext));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 // =========================
@@ -853,6 +881,50 @@ impl eframe::App for SubtitleDownloader {
                                         Some(color) => ui.label(egui::RichText::new(format!(" - {}", status_text)).color(color)),
                                         None => ui.label(format!(" - {}", status_text)),
                                     };
+                                    if let Some(sub_path) = &job.subtitle_path {
+                                        let path_str = sub_path.display().to_string();
+                                        let hyperlink_resp = ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(format!("  [{}]", path_str))
+                                                    .color(egui::Color32::from_rgb(248, 248, 242)) // white
+                                            )
+                                            .sense(egui::Sense::click())
+                                        );
+                                        if hyperlink_resp.hovered() {
+                                            let rect = hyperlink_resp.rect;
+                                            let painter = ui.painter();
+                                            painter.line_segment([
+                                                rect.left_bottom() + egui::vec2(2.0, -2.0),
+                                                rect.right_bottom() + egui::vec2(-2.0, -2.0)
+                                            ],
+                                            egui::Stroke::new(1.5, egui::Color32::from_rgb(139, 233, 253)) // cyan underline
+                                            );
+                                            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                                        }
+                                        if hyperlink_resp.clicked() {
+                                            // Open the folder containing the subtitle file
+                                            #[cfg(target_os = "windows")]
+                                            {
+                                                let _ = std::process::Command::new("explorer")
+                                                    .arg("/select,")
+                                                    .arg(sub_path)
+                                                    .spawn();
+                                            }
+                                            #[cfg(target_os = "linux")]
+                                            {
+                                                let _ = std::process::Command::new("xdg-open")
+                                                    .arg(sub_path.parent().unwrap_or_else(|| std::path::Path::new(".")))
+                                                    .spawn();
+                                            }
+                                            #[cfg(target_os = "macos")]
+                                            {
+                                                let _ = std::process::Command::new("open")
+                                                    .arg("-R")
+                                                    .arg(sub_path)
+                                                    .spawn();
+                                            }
+                                        }
+                                    }
                                 });
                             }
                         });
