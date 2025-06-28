@@ -18,6 +18,7 @@ use std::thread;
 // --- Third-Party Crates ---
 use eframe::egui;
 use image;
+use log::{info, warn, error, debug};
 use rfd::FileDialog;
 use reqwest::blocking::get;
 use winreg::enums::*;
@@ -51,11 +52,13 @@ fn python_version() -> Option<String> {
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 let version = if !stdout.is_empty() { stdout } else { stderr };
                 if version.to_lowercase().contains("python") {
+                    debug!("Found Python version: {} using command: {}", version, cmd);
                     return Some(version);
                 }
             }
         }
     }
+    debug!("No Python installation found");
     None
 }
 
@@ -63,6 +66,7 @@ fn check_subliminal_installed() -> bool {
     // First check if subliminal command is directly available
     if let Ok(output) = run_command_hidden("subliminal", &["--version"], &std::collections::HashMap::new()) {
         if output.status.success() {
+            debug!("Subliminal found as direct command");
             return true;
         }
     }
@@ -71,6 +75,7 @@ fn check_subliminal_installed() -> bool {
     for cmd in &["python", "py", "python3"] {
         if let Ok(output) = run_command_hidden(cmd, &["-m", "pip", "show", "subliminal"], &std::collections::HashMap::new()) {
             if output.status.success() {
+                debug!("Subliminal found via pip show using {}", cmd);
                 return true;
             }
         }
@@ -78,21 +83,29 @@ fn check_subliminal_installed() -> bool {
         // Also try direct module import
         if let Ok(output) = run_command_hidden(cmd, &["-c", "import subliminal; print('subliminal available')"], &std::collections::HashMap::new()) {
             if output.status.success() {
+                debug!("Subliminal found via direct import using {}", cmd);
                 return true;
             }
         }
     }
+    debug!("Subliminal not found");
     false
 }
 
 fn install_subliminal() -> bool {
+    info!("Installing Subliminal via pip");
     for cmd in &["python", "py", "python3"] {
         if let Ok(output) = run_command_hidden(cmd, &["-m", "pip", "install", "subliminal"], &std::collections::HashMap::new()) {
             if output.status.success() {
+                info!("Subliminal installed successfully using {}", cmd);
                 return true;
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!("Failed to install Subliminal using {}: {}", cmd, stderr);
             }
         }
     }
+    error!("Failed to install Subliminal with all Python commands");
     false
 }
 
@@ -245,6 +258,152 @@ fn run_command_hidden(cmd: &str, args: &[&str], env_vars: &std::collections::Has
 }
 
 // =========================
+// === Logging Setup
+// =========================
+
+struct AsyncLogger {
+    sender: mpsc::Sender<LogMessage>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+enum LogMessage {
+    Info(String),
+    Warn(String),
+    Error(String),
+    Debug(String),
+    Shutdown,
+}
+
+impl AsyncLogger {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let (tx, rx) = mpsc::channel();
+        
+        // Get the directory where the executable is located
+        let exe_path = env::current_exe()?;
+        let exe_dir = exe_path.parent().ok_or("Failed to get executable directory")?;
+        let log_path = exe_dir.join("rustitles_log.txt");
+        
+        // Create or open the log file
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        
+        let handle = std::thread::spawn(move || {
+            let mut file = std::io::BufWriter::new(log_file);
+            let mut buffer = VecDeque::new();
+            
+            loop {
+                // Process messages in batches for better performance
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        LogMessage::Shutdown => {
+                            // Flush any remaining messages
+                            for entry in buffer.drain(..) {
+                                let _ = writeln!(file, "{}", entry);
+                            }
+                            let _ = file.flush();
+                            return;
+                        }
+                        _ => {
+                            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                            let entry = match msg {
+                                LogMessage::Info(msg) => format!("[INFO {} src\\main.rs:0] {}", timestamp, msg),
+                                LogMessage::Warn(msg) => format!("[WARN {} src\\main.rs:0] {}", timestamp, msg),
+                                LogMessage::Error(msg) => format!("[ERROR {} src\\main.rs:0] {}", timestamp, msg),
+                                LogMessage::Debug(msg) => format!("[DEBUG {} src\\main.rs:0] {}", timestamp, msg),
+                                LogMessage::Shutdown => unreachable!(),
+                            };
+                            buffer.push_back(entry);
+                        }
+                    }
+                }
+                
+                // Flush buffer if it has enough entries or if we've been idle
+                if buffer.len() >= 10 {
+                    for entry in buffer.drain(..) {
+                        let _ = writeln!(file, "{}", entry);
+                    }
+                    let _ = file.flush();
+                }
+                
+                // Small sleep to prevent busy waiting
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        
+        Ok(AsyncLogger {
+            sender: tx,
+            handle: Some(handle),
+        })
+    }
+    
+    fn log(&self, level: &str, message: &str) {
+        let msg = match level {
+            "INFO" => LogMessage::Info(message.to_string()),
+            "WARN" => LogMessage::Warn(message.to_string()),
+            "ERROR" => LogMessage::Error(message.to_string()),
+            "DEBUG" => LogMessage::Debug(message.to_string()),
+            _ => LogMessage::Info(message.to_string()),
+        };
+        
+        // Non-blocking send - if the channel is full, we just drop the message
+        let _ = self.sender.send(msg);
+    }
+    
+    fn shutdown(self) {
+        let _ = self.sender.send(LogMessage::Shutdown);
+        if let Some(handle) = self.handle {
+            let _ = handle.join();
+        }
+    }
+}
+
+// Global logger instance
+static LOGGER: Mutex<Option<AsyncLogger>> = Mutex::new(None);
+
+fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
+    let logger = AsyncLogger::new()?;
+    let mut guard = LOGGER.lock().map_err(|e| format!("Failed to lock logger: {}", e))?;
+    *guard = Some(logger);
+    Ok(())
+}
+
+fn log_message(level: &str, message: &str) {
+    if let Ok(guard) = LOGGER.lock() {
+        if let Some(logger) = &*guard {
+            logger.log(level, message);
+        }
+    }
+}
+
+// Custom log macros that use our async logger
+macro_rules! info {
+    ($($arg:tt)*) => {
+        log_message("INFO", &format!($($arg)*));
+    };
+}
+
+macro_rules! warn {
+    ($($arg:tt)*) => {
+        log_message("WARN", &format!($($arg)*));
+    };
+}
+
+macro_rules! error {
+    ($($arg:tt)*) => {
+        log_message("ERROR", &format!($($arg)*));
+    };
+}
+
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        log_message("DEBUG", &format!($($arg)*));
+    };
+}
+
+// =========================
 // === App State Structs & Enums
 // =========================
 #[derive(Clone, PartialEq)]
@@ -291,6 +450,8 @@ struct SubtitleDownloader {
 
 impl Default for SubtitleDownloader {
     fn default() -> Self {
+        info!("Initializing SubtitleDownloader");
+        
         let python_version = python_version();
         let python_installed = python_version.is_some();
         let subliminal_installed = if python_installed {
@@ -299,10 +460,14 @@ impl Default for SubtitleDownloader {
             false
         };
 
+        info!("Python installed: {}, version: {:?}", python_installed, python_version);
+        info!("Subliminal installed: {}", subliminal_installed);
+
         let installing_subliminal = python_installed && !subliminal_installed;
         let subliminal_install_result = Arc::new(Mutex::new(None));
 
         if python_installed && !subliminal_installed {
+            info!("Starting automatic Subliminal installation");
             let result_ptr = Arc::clone(&subliminal_install_result);
             std::thread::spawn(move || {
                 let success = install_subliminal();
@@ -397,6 +562,7 @@ impl SubtitleDownloader {
             return;
         }
 
+        info!("Starting folder scan: {}", self.folder_path);
         self.status = "Scanning...".to_string();
         self.scanning = true;
         let (tx, rx) = mpsc::channel();
@@ -441,6 +607,7 @@ impl SubtitleDownloader {
             if overwrite_existing {
                 // If overwrite is enabled, include all videos regardless of existing subtitles
                 missing_subtitles = found_videos.clone();
+                info!("Overwrite mode enabled - including all {} videos", found_videos.len());
             } else {
                 // Only include videos that are missing subtitles
                 for video in &found_videos {
@@ -448,11 +615,13 @@ impl SubtitleDownloader {
                         missing_subtitles.push(video.clone());
                     }
                 }
+                info!("Found {} videos, {} missing subtitles", found_videos.len(), missing_subtitles.len());
             }
 
             *scanned_videos.lock().unwrap() = found_videos;
             *videos_missing_subs.lock().unwrap() = missing_subtitles;
 
+            info!("Folder scan completed");
             let _ = tx.send(());
         });
     }
@@ -460,15 +629,18 @@ impl SubtitleDownloader {
     fn start_downloads(&mut self) {
         if self.downloading || self.selected_languages.is_empty() {
             self.status = "Select at least one language and ensure no downloads are in progress.".to_string();
+            warn!("Cannot start downloads: downloading={}, languages={:?}", self.downloading, self.selected_languages);
             return;
         }
 
         let videos_missing = self.videos_missing_subs.lock().unwrap().clone();
         if videos_missing.is_empty() {
             self.status = "No videos missing subtitles.".to_string();
+            info!("No videos to download subtitles for");
             return;
         }
 
+        info!("Starting subtitle downloads for {} videos with languages: {:?}", videos_missing.len(), self.selected_languages);
         self.status = "Starting subtitle downloads...".to_string();
         self.downloads_completed = 0;
         self.total_downloads = 0;
@@ -491,6 +663,8 @@ impl SubtitleDownloader {
         let force_download = self.force_download;
         let overwrite_existing = self.overwrite_existing;
 
+        info!("Starting download thread with {} concurrent downloads, force={}, overwrite={}", max_concurrent, force_download, overwrite_existing);
+
         self.download_thread_handle = Some(thread::spawn(move || {
             let mut pending_indexes: VecDeque<usize> = (0..jobs_arc.lock().unwrap().len()).collect();
             let mut running_threads = Vec::new();
@@ -500,6 +674,7 @@ impl SubtitleDownloader {
 
                 while running_threads.len() < max_concurrent && !pending_indexes.is_empty() {
                     if cancel_flag.load(Ordering::SeqCst) {
+                        info!("Download cancelled by user");
                         let mut jobs_lock = jobs_arc.lock().unwrap();
                         for job in jobs_lock.iter_mut() {
                             if job.status == JobStatus::Pending || job.status == JobStatus::Running {
@@ -536,6 +711,8 @@ impl SubtitleDownloader {
                             return;
                         }
 
+                        debug!("Processing video: {}", job_path.display());
+
                         // Create cache directory and set environment variables to fix DBM cache issues on Windows
                         let cache_dir = ensure_subliminal_cache_dir().unwrap_or_else(|_| env::temp_dir().join("subliminal_cache"));
                         let mut env_vars = std::collections::HashMap::<String, String>::new();
@@ -560,18 +737,23 @@ impl SubtitleDownloader {
                         let mut all_args = args.clone();
                         all_args.push(job_path.to_str().unwrap());
                         
+                        debug!("Running subliminal command: subliminal {}", all_args.join(" "));
+                        
                         let output = run_command_hidden("subliminal", &all_args, &env_vars)
                             .or_else(|_| {
+                                debug!("Subliminal direct command failed, trying python -m subliminal");
                                 let mut python_args = vec!["-m", "subliminal"];
                                 python_args.extend(&all_args);
                                 run_command_hidden("python", &python_args, &env_vars)
                             })
                             .or_else(|_| {
+                                debug!("Python command failed, trying py -m subliminal");
                                 let mut python_args = vec!["-m", "subliminal"];
                                 python_args.extend(&all_args);
                                 run_command_hidden("py", &python_args, &env_vars)
                             })
                             .or_else(|_| {
+                                debug!("Py command failed, trying python3 -m subliminal");
                                 let mut python_args = vec!["-m", "subliminal"];
                                 python_args.extend(&all_args);
                                 run_command_hidden("python3", &python_args, &env_vars)
@@ -586,9 +768,30 @@ impl SubtitleDownloader {
                         if let Ok(out) = output {
                             let stdout_str = String::from_utf8_lossy(&out.stdout).to_lowercase();
                             let stderr_str = String::from_utf8_lossy(&out.stderr).to_lowercase();
-                            let combined_output = format!("{}\n{}", stdout_str, stderr_str);
+                            let combined_output = format!("{}\n{}", stdout_str, stderr_str).trim().to_string();
                             let subtitle_paths = find_all_subtitle_files(&job_path, &langs_clone);
+                            
+                            // --- LOGGING: Full Subliminal output ---
+                            info!("Subliminal output for {}:\n{}", job_path.display(), combined_output);
+                            info!("END subliminal output");
+                            
                             if let Some(job) = job_opt {
+                                // --- LOGGING: Video name and status ---
+                                let video_name = job_path.file_name().unwrap_or_default().to_string_lossy();
+                                let status_str = match &job.status {
+                                    JobStatus::Success => "Success",
+                                    JobStatus::EmbeddedExists(_) => "Embedded",
+                                    JobStatus::Failed(_) => "Failed",
+                                    JobStatus::Pending => "Pending",
+                                    JobStatus::Running => "Running",
+                                };
+                                info!("SUBTITLE JOBS OUTPUT: {} - {}", video_name, status_str);
+                                // --- LOGGING: Subtitle file paths ---
+                                for sub_path in &subtitle_paths {
+                                    info!("SUBTITLE JOBS OUTPUT: 📄 {}", sub_path.display());
+                                }
+                                // --- END LOGGING ---
+                                
                                 if combined_output.contains("downloaded 0 subtitle") {
                                     if !subtitle_paths.is_empty() {
                                         // If any subtitles were downloaded, always report Success (even if ignoring embedded)
@@ -619,6 +822,11 @@ impl SubtitleDownloader {
                                 }
                                 job.subtitle_paths = subtitle_paths;
                             }
+                        } else {
+                            error!("Failed to run subliminal for {}", job_path.display());
+                            if let Some(job) = job_opt {
+                                job.status = JobStatus::Failed("Failed to run subliminal".to_string());
+                            }
                         }
                     });
 
@@ -626,6 +834,7 @@ impl SubtitleDownloader {
                 }
 
                 if cancel_flag.load(Ordering::SeqCst) {
+                    info!("Download cancelled by user");
                     let mut jobs_lock = jobs_arc.lock().unwrap();
                     for job in jobs_lock.iter_mut() {
                         if job.status == JobStatus::Pending || job.status == JobStatus::Running {
@@ -637,6 +846,8 @@ impl SubtitleDownloader {
 
                 thread::sleep(std::time::Duration::from_millis(200));
             }
+            
+            info!("Download thread completed");
         }));
     }
 
@@ -649,7 +860,16 @@ impl SubtitleDownloader {
         let jobs = self.download_jobs.lock().unwrap();
         let success_count = jobs.iter().filter(|j| j.status == JobStatus::Success || matches!(j.status, JobStatus::EmbeddedExists(_))).count();
         let running_count = jobs.iter().filter(|j| j.status == JobStatus::Running).count();
+        let failed_count = jobs.iter().filter(|j| matches!(j.status, JobStatus::Failed(_))).count();
+        
+        let previous_completed = self.downloads_completed;
         self.downloads_completed = success_count;
+
+        // Log progress changes
+        if self.downloads_completed != previous_completed {
+            debug!("Download progress: {}/{} completed, {} running, {} failed", 
+                self.downloads_completed, self.total_downloads, running_count, failed_count);
+        }
 
         // Check if download thread is finished
         if let Some(handle) = &self.download_thread_handle {
@@ -661,6 +881,7 @@ impl SubtitleDownloader {
                 let failed_count = jobs.iter().filter(|j| matches!(j.status, JobStatus::Failed(_))).count();
                 let success_count = jobs.iter().filter(|j| j.status == JobStatus::Success || matches!(j.status, JobStatus::EmbeddedExists(_))).count();
                 
+                info!("Download session completed: {} successful, {} failed", success_count, failed_count);
                 self.status = format!("Subtitle jobs completed: {} successful, {} failed", success_count, failed_count);
                 self.is_downloading = false;
             } else {
@@ -687,11 +908,14 @@ fn find_all_subtitle_files(video_path: &Path, langs: &[String]) -> Vec<PathBuf> 
     let subtitle_extensions = ["srt", "sub", "ssa", "ass", "vtt"];
     let mut found_subtitles = Vec::new();
     
+    debug!("Searching for subtitle files for {} in {}", video_path.display(), folder.display());
+    
     // Try language-specific first
     for lang in langs {
         for ext in &subtitle_extensions {
             let candidate = folder.join(format!("{}.{}.{}", stem, lang, ext));
             if candidate.exists() {
+                debug!("Found language-specific subtitle: {}", candidate.display());
                 found_subtitles.push(candidate);
                 break; // Found one for this language, move to next
             }
@@ -701,10 +925,18 @@ fn find_all_subtitle_files(video_path: &Path, langs: &[String]) -> Vec<PathBuf> 
     for ext in &subtitle_extensions {
         let candidate = folder.join(format!("{}.{}", stem, ext));
         if candidate.exists() {
+            debug!("Found generic subtitle: {}", candidate.display());
             found_subtitles.push(candidate);
             break; // Found one generic, stop
         }
     }
+    
+    if found_subtitles.is_empty() {
+        debug!("No subtitle files found for {}", video_path.display());
+    } else {
+        debug!("Found {} subtitle files for {}", found_subtitles.len(), video_path.display());
+    }
+    
     found_subtitles
 }
 
@@ -792,9 +1024,10 @@ impl eframe::App for SubtitleDownloader {
                 self.installing_python = false;
                 match result {
                     Ok(_) => {
+                        info!("Python installation completed successfully");
                         // Refresh environment to pick up new Python installation
                         if let Err(e) = refresh_environment() {
-                            eprintln!("Failed to refresh environment: {}", e);
+                            error!("Failed to refresh environment: {}", e);
                         }
                         self.python_version = python_version();
                         self.python_installed = self.python_version.is_some();
@@ -818,6 +1051,7 @@ impl eframe::App for SubtitleDownloader {
                         });
                     }
                     Err(e) => {
+                        error!("Python installation failed: {}", e);
                         self.status = format!("❌ Python install failed: {}", e);
                     }
                 }
@@ -829,15 +1063,17 @@ impl eframe::App for SubtitleDownloader {
                 self.installing_subliminal = false;
                 match result {
                     Ok(_) => {
+                        info!("Subliminal installation completed successfully");
                         // Refresh environment to pick up new subliminal installation
                         if let Err(e) = refresh_environment() {
-                            eprintln!("Failed to refresh environment: {}", e);
+                            error!("Failed to refresh environment: {}", e);
                         }
                         
                         self.subliminal_installed = true;
                         self.status = "✅ Subliminal installed.".to_string();
                     }
                     Err(e) => {
+                        error!("Subliminal installation failed: {}", e);
                         self.status = format!("❌ Subliminal install failed: {}", e);
                     }
                 }
@@ -863,6 +1099,7 @@ impl eframe::App for SubtitleDownloader {
             } else {
                 ui.label("❌ Python not found");
                 if ui.button("Install Python").clicked() {
+                    info!("User initiated Python installation");
                     self.status = "Installing Python 3.13.5... (Please check your taskbar for a UAC prompt and accept)".to_string();
                     self.installing_python = true;
                     let result_ptr = self.python_install_result.clone();
@@ -885,6 +1122,7 @@ impl eframe::App for SubtitleDownloader {
                 } else {
                     ui.label("❌ Subliminal not found");
                     if ui.button("Install Subliminal").clicked() {
+                        info!("User initiated Subliminal installation");
                         self.status = "Installing Subliminal...".to_string();
                         self.installing_subliminal = true;
                         let result_ptr = self.subliminal_install_result.clone();
@@ -927,21 +1165,27 @@ impl eframe::App for SubtitleDownloader {
                                 if ui.checkbox(&mut selected, *name).changed() {
                                     if selected {
                                         self.selected_languages.push(code.to_string());
+                                        debug!("Language selected: {}", code);
                                     } else {
                                         self.selected_languages.retain(|c| c != code);
+                                        debug!("Language deselected: {}", code);
                                     }
                                     
                                     // Re-scan for missing subtitles when languages change
                                     if !self.folder_path.is_empty() {
+                                        info!("Languages changed to {:?}, re-scanning folder", self.selected_languages);
                                         self.scan_folder();
                                     }
                                 }
                             }
                         });
 
-                    ui.checkbox(&mut self.force_download, "Ignore Embedded Subtitles");
+                    if ui.checkbox(&mut self.force_download, "Ignore Embedded Subtitles").changed() {
+                        info!("(Ignore Embedded Subtitles) changed to: {}", self.force_download);
+                    }
                     ui.add_space(0.0);
                     if ui.checkbox(&mut self.overwrite_existing, "Overwrite Existing Subtitles").changed() {
+                        info!("(Overwrite Existing Subtitles) changed to: {}", self.overwrite_existing);
                         // Re-scan for missing subtitles when overwrite option changes
                         if !self.folder_path.is_empty() {
                             self.scan_folder();
@@ -957,7 +1201,9 @@ impl eframe::App for SubtitleDownloader {
                     if ui.add_sized([25.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(&mut concurrent_text)).changed() {
                         if let Ok(value) = concurrent_text.parse::<usize>() {
                             if value > 0 {
+                                let old_value = self.concurrent_downloads;
                                 self.concurrent_downloads = value.min(100);
+                                debug!("Concurrent downloads changed from {} to {}", old_value, self.concurrent_downloads);
                             }
                         }
                     }
@@ -971,6 +1217,7 @@ impl eframe::App for SubtitleDownloader {
                         if let Some(folder) = FileDialog::new().pick_folder() {
                             let new_folder = folder.display().to_string();
                             if self.folder_path != new_folder {
+                                info!("Folder selected: {}", new_folder);
                                 self.folder_path = new_folder;
                                 self.scan_folder();
                             }
@@ -1052,6 +1299,7 @@ impl eframe::App for SubtitleDownloader {
                                             ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
                                         }
                                         if hyperlink_resp.clicked() {
+                                            debug!("User clicked subtitle path: {}", path_str);
                                             // Open the folder containing the subtitle file
                                             #[cfg(target_os = "windows")]
                                             {
@@ -1119,6 +1367,7 @@ impl eframe::App for SubtitleDownloader {
                     self.scan_done_receiver = None;
 
                     // Start downloads automatically after scan
+                    info!("Scan completed, starting downloads automatically");
                     self.start_downloads();
                 }
             }
@@ -1126,12 +1375,26 @@ impl eframe::App for SubtitleDownloader {
 
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        info!("Application closed by user");
+        info!("");
+        info!("---------------------------------------------------------------");
+        info!("");
+    }
 }
 
 // =========================
 // === Main Entry Point
 // =========================
 fn main() {
+    // Initialize logging
+    if let Err(e) = setup_logging() {
+        eprintln!("Failed to initialize logging: {}", e);
+    }
+    
+    info!("Starting Rustitles application");
+    
     // Load icon from embedded ICO file
     let icon_data = if let Ok(image) = image::load_from_memory(include_bytes!("../resources/rustitles_icon.ico")) {
         let rgba = image.to_rgba8();
@@ -1142,6 +1405,7 @@ fn main() {
             height: size[1],
         })
     } else {
+        warn!("Failed to load application icon");
         None
     };
 
@@ -1187,7 +1451,10 @@ fn main() {
         viewport: viewport_builder,
         ..Default::default()
     };
-    eframe::run_native(
+    
+    info!("Initializing GUI with window size: {}x{}", window_size[0], window_size[1]);
+    
+    let result = eframe::run_native(
         "Rustitles",
         native_options,
         Box::new(|cc| {
@@ -1211,7 +1478,17 @@ fn main() {
             
             cc.egui_ctx.set_visuals(visuals);
             
+            info!("GUI initialized successfully");
             Box::new(SubtitleDownloader::default())
         }),
-    ).expect("Failed to start eframe");
+    );
+    
+    // Shutdown logger when app exits
+    if let Ok(mut guard) = LOGGER.lock() {
+        if let Some(logger) = guard.take() {
+            logger.shutdown();
+        }
+    }
+    
+    result.expect("Failed to start eframe");
 }
