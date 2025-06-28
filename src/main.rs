@@ -252,7 +252,7 @@ enum JobStatus {
     Pending,
     Running,
     Success,
-    EmbeddedExists(String), // full language name
+    EmbeddedExists(String), // full message
     Failed(String),
 }
 
@@ -580,34 +580,44 @@ impl SubtitleDownloader {
                         let mut jobs_lock = jobs_clone.lock().unwrap();
                         let job_opt = jobs_lock.iter_mut().find(|j| j.video_path == job_path);
 
-                        match output {
-                            Ok(out) if out.status.success() => {
-                                let stdout_str = String::from_utf8_lossy(&out.stdout).to_lowercase();
-                                let stderr_str = String::from_utf8_lossy(&out.stderr).to_lowercase();
-                                let combined_output = format!("{}\n{}", stdout_str, stderr_str);
-                                let subtitle_paths = find_all_subtitle_files(&job_path, &langs_clone);
-                                if let Some(job) = job_opt {
-                                    if combined_output.contains("downloaded 0 subtitle") {
-                                        // Assume embedded subtitles exist for the requested language(s)
-                                        let lang_code = langs_clone.get(0).cloned().unwrap_or_else(|| "unknown".to_string());
-                                        let lang_name = language_code_to_name(&lang_code).to_string();
-                                        job.status = JobStatus::EmbeddedExists(lang_name);
-                                    } else {
+                        let embedded_phrases = [
+                            "embedded", "already exists", "no need to download", "subtitle(s) already present", "has embedded subtitles", "skipping"
+                        ];
+                        if let Ok(out) = output {
+                            let stdout_str = String::from_utf8_lossy(&out.stdout).to_lowercase();
+                            let stderr_str = String::from_utf8_lossy(&out.stderr).to_lowercase();
+                            let combined_output = format!("{}\n{}", stdout_str, stderr_str);
+                            let subtitle_paths = find_all_subtitle_files(&job_path, &langs_clone);
+                            if let Some(job) = job_opt {
+                                if combined_output.contains("downloaded 0 subtitle") {
+                                    if !subtitle_paths.is_empty() {
+                                        // If any subtitles were downloaded, always report Success (even if ignoring embedded)
                                         job.status = JobStatus::Success;
+                                    } else if !force_download {
+                                        // Only check for embedded if not forcing download
+                                        if let Some(lang_name) = has_embedded_subtitle(&job_path, &langs_clone) {
+                                            job.status = JobStatus::EmbeddedExists(format!("Embedded {} subtitles already exist (no external subtitles found online)", lang_name));
+                                        } else if embedded_phrases.iter().any(|phrase| combined_output.contains(phrase)) {
+                                            let lang_code = langs_clone.get(0).cloned().unwrap_or_else(|| "unknown".to_string());
+                                            let lang_name = language_code_to_name(&lang_code).to_string();
+                                            job.status = JobStatus::EmbeddedExists(format!("Embedded {} subtitles already exist (no external subtitles found online)", lang_name));
+                                        } else {
+                                            job.status = JobStatus::Failed("No subtitles found (no embedded or external subtitles available)".to_string());
+                                        }
+                                    } else {
+                                        // Forced, but nothing downloaded
+                                        job.status = JobStatus::Failed("No subtitles found online".to_string());
                                     }
-                                    job.subtitle_paths = subtitle_paths;
+                                } else if combined_output.contains("error") || combined_output.contains("failed") {
+                                    if !subtitle_paths.is_empty() {
+                                        job.status = JobStatus::Success;
+                                    } else {
+                                        job.status = JobStatus::Failed("Subliminal error: see log".to_string());
+                                    }
+                                } else {
+                                    job.status = JobStatus::Success;
                                 }
-                            }
-                            Ok(out) => {
-                                let err_str = String::from_utf8_lossy(&out.stderr).to_string();
-                                if let Some(job) = job_opt {
-                                    job.status = JobStatus::Failed(err_str);
-                                }
-                            }
-                            Err(e) => {
-                                if let Some(job) = job_opt {
-                                    job.status = JobStatus::Failed(format!("Failed to run subliminal: {}", e));
-                                }
+                                job.subtitle_paths = subtitle_paths;
                             }
                         }
                     });
@@ -726,6 +736,47 @@ fn language_code_to_name(code: &str) -> &str {
         "zh-tw" => "Chinese (Traditional)",
         _ => code,
     }
+}
+
+// === Embedded Subtitle Detection with ffprobe ===
+fn has_embedded_subtitle(video_path: &std::path::Path, langs: &[String]) -> Option<String> {
+    use std::process::Command;
+    let mut cmd = Command::new("ffprobe");
+    cmd.arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("s")
+        .arg("-show_entries")
+        .arg("stream=index:stream_tags=language")
+        .arg("-of")
+        .arg("csv=p=0")
+        .arg(video_path);
+    // Hide the window on Windows
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = cmd.output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                // Each line: index,language (e.g., 0,eng)
+                let parts: Vec<&str> = line.split(',').collect();
+                if parts.len() >= 2 {
+                    let lang = parts[1].trim().to_lowercase();
+                    for req in langs {
+                        // Accept both 2-letter and 3-letter codes
+                        if lang == req.to_lowercase() || lang.starts_with(&req.to_lowercase()) {
+                            return Some(language_code_to_name(req).to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 // =========================
@@ -965,7 +1016,7 @@ impl eframe::App for SubtitleDownloader {
                                     JobStatus::Pending => ("Pending".to_string(), Some(egui::Color32::from_rgb(241, 250, 140))), // yellow
                                     JobStatus::Running => ("Running".to_string(), Some(egui::Color32::from_rgb(189, 147, 249))), // lighter purple
                                     JobStatus::Success => ("Success".to_string(), Some(egui::Color32::from_rgb(80, 250, 123))), // green
-                                    JobStatus::EmbeddedExists(lang) => (format!("Embedded {} subtitles already exist", lang), Some(egui::Color32::from_rgb(255, 184, 108))), // orange
+                                    JobStatus::EmbeddedExists(msg) => (msg.clone(), Some(egui::Color32::from_rgb(255, 184, 108))), // orange
                                     JobStatus::Failed(err) => (format!("Failed: {}", err), Some(egui::Color32::from_rgb(255, 85, 85))), // red
                                 };
                                 // Video name and status on first line
