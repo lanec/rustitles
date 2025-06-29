@@ -21,6 +21,8 @@ use image;
 use log::{info, warn, error, debug};
 use rfd::FileDialog;
 use reqwest::blocking::get;
+use serde::{Deserialize, Serialize};
+use serde_json;
 use winreg::enums::*;
 use winreg::RegKey;
 // --- Windows API ---
@@ -40,6 +42,75 @@ static VIDEO_EXTENSIONS: &[&str] = &[
     "mpe", "mpv2", "m2v", "m1v", "m2p", "trp", "tp", "ps", "evo", "ogm", "ogx", "mod", "rec",
     "dvr-ms", "pva", "wtv", "m4p", "m4b", "m4r", "m4a", "3gpp", "3gpp2"
 ];
+
+// =========================
+// === Settings Management
+// =========================
+#[derive(Serialize, Deserialize, Clone)]
+struct Settings {
+    selected_languages: Vec<String>,
+    force_download: bool,
+    overwrite_existing: bool,
+    concurrent_downloads: usize,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            selected_languages: Vec::new(),
+            force_download: false,
+            overwrite_existing: false,
+            concurrent_downloads: 25,
+        }
+    }
+}
+
+fn get_settings_path() -> std::io::Result<PathBuf> {
+    let exe_path = env::current_exe()?;
+    let exe_dir = exe_path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to get executable directory")
+    })?;
+    Ok(exe_dir.join("rustitles_settings.json"))
+}
+
+fn load_settings() -> Settings {
+    match get_settings_path() {
+        Ok(path) => {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    match serde_json::from_str(&content) {
+                        Ok(settings) => {
+                            info!("Settings loaded from {}", path.display());
+                            settings
+                        }
+                        Err(e) => {
+                            warn!("Failed to parse settings file: {}. Using defaults.", e);
+                            Settings::default()
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!("Settings file not found or unreadable: {}. Using defaults.", e);
+                    Settings::default()
+                }
+            }
+        }
+        Err(e) => {
+            warn!("Failed to get settings path: {}. Using defaults.", e);
+            Settings::default()
+        }
+    }
+}
+
+fn save_settings(settings: &Settings) -> Result<(), String> {
+    let path = get_settings_path().map_err(|e| format!("Failed to get settings path: {}", e))?;
+    let json = serde_json::to_string_pretty(settings)
+        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+    std::fs::write(&path, json)
+        .map_err(|e| format!("Failed to write settings file: {}", e))?;
+    debug!("Settings saved to {}", path.display());
+    Ok(())
+}
 
 // =========================
 // === Utility Functions (Python, Subliminal, Env)
@@ -446,11 +517,17 @@ struct SubtitleDownloader {
     download_thread_handle: Option<thread::JoinHandle<()>>,
     cancel_flag: Arc<AtomicBool>,
     concurrent_downloads: usize,
+    keep_dropdown_open: bool,
 }
 
 impl Default for SubtitleDownloader {
     fn default() -> Self {
         info!("Initializing SubtitleDownloader");
+        
+        // Load saved settings
+        let settings = load_settings();
+        info!("Loaded settings: languages={:?}, force={}, overwrite={}, concurrent={}", 
+              settings.selected_languages, settings.force_download, settings.overwrite_existing, settings.concurrent_downloads);
         
         let python_version = python_version();
         let python_installed = python_version.is_some();
@@ -499,9 +576,9 @@ impl Default for SubtitleDownloader {
             installing_subliminal,
             python_install_result: Arc::new(Mutex::new(None)),
             subliminal_install_result,
-            selected_languages: vec![],
-            force_download: false,
-            overwrite_existing: false,
+            selected_languages: settings.selected_languages,
+            force_download: settings.force_download,
+            overwrite_existing: settings.overwrite_existing,
             folder_path: String::new(),
             scanned_videos: Arc::new(Mutex::new(Vec::new())),
             videos_missing_subs: Arc::new(Mutex::new(Vec::new())),
@@ -511,12 +588,28 @@ impl Default for SubtitleDownloader {
             downloading: false,
             download_thread_handle: None,
             cancel_flag: Arc::new(AtomicBool::new(false)),
-            concurrent_downloads: 25,
+            concurrent_downloads: settings.concurrent_downloads,
+            keep_dropdown_open: false,
         }
     }
 }
 
 impl SubtitleDownloader {
+    fn save_current_settings(&self) {
+        let settings = Settings {
+            selected_languages: self.selected_languages.clone(),
+            force_download: self.force_download,
+            overwrite_existing: self.overwrite_existing,
+            concurrent_downloads: self.concurrent_downloads,
+        };
+        
+        if let Err(e) = save_settings(&settings) {
+            warn!("Failed to save settings: {}", e);
+        } else {
+            debug!("Settings saved successfully");
+        }
+    }
+
     fn video_missing_subtitle(video_path: &Path, selected_languages: &[String]) -> bool {
         if let Some(stem) = video_path.file_stem().and_then(|s| s.to_str()) {
             let folder = video_path.parent().unwrap_or_else(|| Path::new(""));
@@ -1157,205 +1250,243 @@ impl eframe::App for SubtitleDownloader {
                 ];
 
                 ui.horizontal(|ui| {
-                    egui::ComboBox::from_label("Select Languages")
-                        .selected_text(self.selected_languages.join(", "))
-                        .show_ui(ui, |ui| {
-                            for (code, name) in &language_list {
-                                let mut selected = self.selected_languages.contains(&code.to_string());
-                                if ui.checkbox(&mut selected, *name).changed() {
-                                    if selected {
-                                        self.selected_languages.push(code.to_string());
-                                        debug!("Language selected: {}", code);
-                                    } else {
-                                        self.selected_languages.retain(|c| c != code);
-                                        debug!("Language deselected: {}", code);
-                                    }
-                                    
-                                    // Re-scan for missing subtitles when languages change
-                                    if !self.folder_path.is_empty() {
-                                        info!("Languages changed to {:?}, re-scanning folder", self.selected_languages);
-                                        self.scan_folder();
-                                    }
-                                }
-                            }
-                        });
+                    // Button that looks like ComboBox (no dropdown arrow)
+                    let selected_text = if self.selected_languages.is_empty() {
+                        "Select Languages".to_string()
+                    } else {
+                        self.selected_languages.join(", ")
+                    };
+                    
+                    let button_response = ui.add_sized([130.0, ui.spacing().interact_size.y], egui::Button::new(selected_text));
+                    if button_response.clicked() {
+                        debug!("Button clicked! Current state: {}", self.keep_dropdown_open);
+                        self.keep_dropdown_open = !self.keep_dropdown_open;
+                        debug!("New state: {}", self.keep_dropdown_open);
+                    }
 
-                    if ui.checkbox(&mut self.force_download, "Ignore Embedded Subtitles").changed() {
+                    let force_checkbox_response = ui.checkbox(&mut self.force_download, "Ignore Embedded Subtitles");
+                    if force_checkbox_response.changed() {
                         info!("(Ignore Embedded Subtitles) changed to: {}", self.force_download);
+                        self.keep_dropdown_open = false; // Close dropdown when checkbox is clicked
+                        self.save_current_settings(); // Save settings when changed
                     }
                     ui.add_space(0.0);
-                    if ui.checkbox(&mut self.overwrite_existing, "Overwrite Existing Subtitles").changed() {
+                    let overwrite_checkbox_response = ui.checkbox(&mut self.overwrite_existing, "Overwrite Existing Subtitles");
+                    if overwrite_checkbox_response.changed() {
                         info!("(Overwrite Existing Subtitles) changed to: {}", self.overwrite_existing);
+                        self.keep_dropdown_open = false; // Close dropdown when checkbox is clicked
+                        self.save_current_settings(); // Save settings when changed
                         // Re-scan for missing subtitles when overwrite option changes
                         if !self.folder_path.is_empty() {
                             self.scan_folder();
                         }
                     }
                 });
-
-                ui.separator();
-
-                ui.horizontal(|ui| {
-                    ui.label("Concurrent Downloads:");
-                    let mut concurrent_text = self.concurrent_downloads.to_string();
-                    if ui.add_sized([25.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(&mut concurrent_text)).changed() {
-                        if let Ok(value) = concurrent_text.parse::<usize>() {
-                            if value > 0 {
-                                let old_value = self.concurrent_downloads;
-                                self.concurrent_downloads = value.min(100);
-                                debug!("Concurrent downloads changed from {} to {}", old_value, self.concurrent_downloads);
-                            }
-                        }
-                    }
-                });
-
-                ui.separator();
-
-                ui.horizontal(|ui| {
-                    ui.label("Folder to scan:");
-                    if ui.button("Select Folder").clicked() {
-                        if let Some(folder) = FileDialog::new().pick_folder() {
-                            let new_folder = folder.display().to_string();
-                            if self.folder_path != new_folder {
-                                info!("Folder selected: {}", new_folder);
-                                self.folder_path = new_folder;
-                                self.scan_folder();
-                            }
-                        }
-                    }
-                    ui.label(&self.folder_path);
-                });
-
-                ui.separator();
-
-                if !self.folder_path.is_empty() {
-                    let scanned_count = self.scanned_videos.lock().unwrap().len();
-                    let missing_count = self.videos_missing_subs.lock().unwrap().len();
-                    ui.label(format!("Found videos: {}", scanned_count));
-                    if self.overwrite_existing {
-                        ui.label(format!("Overwriting {} Subtitles", missing_count));
-                    } else {
-                        ui.label(format!("Videos missing subtitles: {}", missing_count));
-                    }
-                }
-
-                // Show download jobs status
-                let jobs = self.download_jobs.lock().unwrap();
-                if !jobs.is_empty() {
-                    ui.label("Subtitle Jobs:");
-                    ui.separator();
-                    
-                    // Calculate available height for the scroll area
-                    // Reserve space for: status label, progress label, progress bar, and some padding
-                    let reserved_height = 80.0; // Approximate space needed for bottom elements
-                    let available_height = ui.available_height() - reserved_height;
-                    let scroll_height = available_height.max(200.0); // Minimum height of 200px (previous default)
-                    
-                    egui::ScrollArea::vertical()
-                        .max_height(scroll_height)
-                        .show(ui, |ui| {
-                            // Set a fixed width to ensure consistent scroll bar positioning
-                            let available_width = ui.available_width();
-                            ui.set_width(available_width - 20.0); // Reserve space for scroll bar
-                            
-                            for job in jobs.iter() {
-                                let (status_text, status_color) = match &job.status {
-                                    JobStatus::Pending => ("Pending".to_string(), Some(egui::Color32::from_rgb(241, 250, 140))), // yellow
-                                    JobStatus::Running => ("Running".to_string(), Some(egui::Color32::from_rgb(189, 147, 249))), // lighter purple
-                                    JobStatus::Success => ("Success".to_string(), Some(egui::Color32::from_rgb(80, 250, 123))), // green
-                                    JobStatus::EmbeddedExists(msg) => (msg.clone(), Some(egui::Color32::from_rgb(255, 184, 108))), // orange
-                                    JobStatus::Failed(err) => (format!("Failed: {}", err), Some(egui::Color32::from_rgb(255, 85, 85))), // red
-                                };
-                                // Video name and status on first line
-                                ui.horizontal(|ui| {
-                                    ui.label(job.video_path.file_name().unwrap_or_default().to_string_lossy());
-                                    match status_color {
-                                        Some(color) => ui.label(egui::RichText::new(format!(" - {}", status_text)).color(color)),
-                                        None => ui.label(format!(" - {}", status_text)),
-                                    };
-                                });
-                                
-                                // Subtitle path on second line (indented)
-                                for sub_path in &job.subtitle_paths {
-                                    ui.horizontal(|ui| {
-                                        ui.add_space(20.0); // Indent the subtitle path
-                                        let path_str = sub_path.display().to_string();
-                                        let hyperlink_resp = ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(format!("📄 {}", path_str))
-                                                    .color(egui::Color32::from_rgb(248, 248, 242)) // white
-                                            )
-                                            .sense(egui::Sense::click())
-                                        );
-                                        if hyperlink_resp.hovered() {
-                                            let rect = hyperlink_resp.rect;
-                                            let painter = ui.painter();
-                                            painter.line_segment([
-                                                rect.left_bottom() + egui::vec2(2.0, -2.0),
-                                                rect.right_bottom() + egui::vec2(-2.0, -2.0)
-                                            ],
-                                            egui::Stroke::new(1.5, egui::Color32::from_rgb(139, 233, 253)) // cyan underline
-                                            );
-                                            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                
+                // Simple popup that shows when button is clicked
+                if self.keep_dropdown_open {
+                    ui.add_space(5.0);
+                    ui.group(|ui| {
+                        ui.set_width(200.0);
+                        
+                        egui::ScrollArea::vertical()
+                            .max_height(200.0)
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width()); // Make scrollbar flush right
+                                for (code, name) in &language_list {
+                                    let mut selected = self.selected_languages.contains(&code.to_string());
+                                    if ui.checkbox(&mut selected, *name).changed() {
+                                        if selected {
+                                            self.selected_languages.push(code.to_string());
+                                            debug!("Language selected: {}", code);
+                                        } else {
+                                            self.selected_languages.retain(|c| c != code);
+                                            debug!("Language deselected: {}", code);
                                         }
-                                        if hyperlink_resp.clicked() {
-                                            debug!("User clicked subtitle path: {}", path_str);
-                                            // Open the folder containing the subtitle file
-                                            #[cfg(target_os = "windows")]
-                                            {
-                                                let _ = std::process::Command::new("explorer")
-                                                    .arg("/select,")
-                                                    .arg(sub_path)
-                                                    .spawn();
-                                            }
-                                            #[cfg(target_os = "linux")]
-                                            {
-                                                let _ = std::process::Command::new("xdg-open")
-                                                    .arg(sub_path.parent().unwrap_or_else(|| std::path::Path::new(".")))
-                                                    .spawn();
-                                            }
-                                            #[cfg(target_os = "macos")]
-                                            {
-                                                let _ = std::process::Command::new("open")
-                                                    .arg("-R")
-                                                    .arg(sub_path)
-                                                    .spawn();
-                                            }
+                                        
+                                        self.save_current_settings(); // Save settings when languages change
+                                        
+                                        // Re-scan for missing subtitles when languages change
+                                        if !self.folder_path.is_empty() {
+                                            info!("Languages changed to {:?}, re-scanning folder", self.selected_languages);
+                                            self.scan_folder();
                                         }
-                                    });
+                                    }
                                 }
-                            }
-                        });
-                }
-
-                if !self.folder_path.is_empty() {
-                    ui.separator();
-                }
-
-                ui.label(&self.status);
-
-                // Show progress bar only when downloads are active or complete
-                if self.is_downloading || (!self.downloading && self.total_downloads > 0) {
-                    if self.total_downloads > 0 {
-                        ui.add_space(10.0);
-                        ui.label(format!("Progress: {} / {}", self.downloads_completed, self.total_downloads));
-                    }
-                }
-                // Place the progress bar here, outside the ScrollArea. always fit the window
-                if (self.is_downloading || (!self.downloading && self.total_downloads > 0)) && self.total_downloads > 0 {
-                    let progress = self.downloads_completed as f32 / self.total_downloads as f32;
-                    let window_width = ui.ctx().screen_rect().width();
-                    let progress_bar = egui::ProgressBar::new(progress)
-                        .show_percentage()
-                        .fill(egui::Color32::from_rgb(124, 99, 160)) // #7c63a0
-                        .desired_width(window_width - 18.0);
-                    ui.add(progress_bar);
+                            });
+                    });
                 }
             } else {
                 // Show message when subliminal is not installed
                 ui.label("Please install Python and Subliminal above to start downloading subtitles.");
             }
 
+            ui.separator();
+
+            ui.horizontal(|ui| {
+                ui.label("Concurrent Downloads:");
+                let mut concurrent_text = self.concurrent_downloads.to_string();
+                let text_response = ui.add_sized([25.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(&mut concurrent_text));
+                if text_response.changed() {
+                    if let Ok(value) = concurrent_text.parse::<usize>() {
+                        if value > 0 {
+                            let old_value = self.concurrent_downloads;
+                            self.concurrent_downloads = value.min(100);
+                            debug!("Concurrent downloads changed from {} to {}", old_value, self.concurrent_downloads);
+                            self.save_current_settings(); // Save settings when changed
+                        }
+                    }
+                    self.keep_dropdown_open = false; // Close dropdown when text field is changed
+                }
+                if text_response.gained_focus() {
+                    self.keep_dropdown_open = false; // Close dropdown when text field gains focus
+                }
+            });
+
+            ui.separator();
+
+            ui.horizontal(|ui| {
+                ui.label("Folder to scan:");
+                let folder_button_response = ui.button("Select Folder");
+                if folder_button_response.clicked() {
+                    self.keep_dropdown_open = false; // Close dropdown when folder button is clicked
+                    if let Some(folder) = FileDialog::new().pick_folder() {
+                        let new_folder = folder.display().to_string();
+                        if self.folder_path != new_folder {
+                            info!("Folder selected: {}", new_folder);
+                            self.folder_path = new_folder;
+                            self.scan_folder();
+                        }
+                    }
+                }
+                ui.label(&self.folder_path);
+            });
+
+            ui.separator();
+
+            if !self.folder_path.is_empty() {
+                let scanned_count = self.scanned_videos.lock().unwrap().len();
+                let missing_count = self.videos_missing_subs.lock().unwrap().len();
+                ui.label(format!("Found videos: {}", scanned_count));
+                if self.overwrite_existing {
+                    ui.label(format!("Overwriting {} Subtitles", missing_count));
+                } else {
+                    ui.label(format!("Videos missing subtitles: {}", missing_count));
+                }
+            }
+
+            // Show download jobs status
+            let jobs = self.download_jobs.lock().unwrap();
+            if !jobs.is_empty() {
+                ui.label("Subtitle Jobs:");
+                ui.separator();
+                
+                // Calculate available height for the scroll area
+                // Reserve space for: status label, progress label, progress bar, and some padding
+                let reserved_height = 80.0; // Approximate space needed for bottom elements
+                let available_height = ui.available_height() - reserved_height;
+                let scroll_height = available_height.max(200.0); // Minimum height of 200px (previous default)
+                
+                egui::ScrollArea::vertical()
+                    .max_height(scroll_height)
+                    .show(ui, |ui| {
+                        // Set a fixed width to ensure consistent scroll bar positioning
+                        let available_width = ui.available_width();
+                        ui.set_width(available_width - 20.0); // Reserve space for scroll bar
+                        
+                        for job in jobs.iter() {
+                            let (status_text, status_color) = match &job.status {
+                                JobStatus::Pending => ("Pending".to_string(), Some(egui::Color32::from_rgb(241, 250, 140))), // yellow
+                                JobStatus::Running => ("Running".to_string(), Some(egui::Color32::from_rgb(189, 147, 249))), // lighter purple
+                                JobStatus::Success => ("Success".to_string(), Some(egui::Color32::from_rgb(80, 250, 123))), // green
+                                JobStatus::EmbeddedExists(msg) => (msg.clone(), Some(egui::Color32::from_rgb(255, 184, 108))), // orange
+                                JobStatus::Failed(err) => (format!("Failed: {}", err), Some(egui::Color32::from_rgb(255, 85, 85))), // red
+                            };
+                            // Video name and status on first line
+                            ui.horizontal(|ui| {
+                                ui.label(job.video_path.file_name().unwrap_or_default().to_string_lossy());
+                                match status_color {
+                                    Some(color) => ui.label(egui::RichText::new(format!(" - {}", status_text)).color(color)),
+                                    None => ui.label(format!(" - {}", status_text)),
+                                };
+                            });
+                            
+                            // Subtitle path on second line (indented)
+                            for sub_path in &job.subtitle_paths {
+                                ui.horizontal(|ui| {
+                                    ui.add_space(20.0); // Indent the subtitle path
+                                    let path_str = sub_path.display().to_string();
+                                    let hyperlink_resp = ui.add(
+                                        egui::Label::new(
+                                            egui::RichText::new(format!("📄 {}", path_str))
+                                                .color(egui::Color32::from_rgb(248, 248, 242)) // white
+                                        )
+                                        .sense(egui::Sense::click())
+                                    );
+                                    if hyperlink_resp.hovered() {
+                                        let rect = hyperlink_resp.rect;
+                                        let painter = ui.painter();
+                                        painter.line_segment([
+                                            rect.left_bottom() + egui::vec2(2.0, -2.0),
+                                            rect.right_bottom() + egui::vec2(-2.0, -2.0)
+                                        ],
+                                        egui::Stroke::new(1.5, egui::Color32::from_rgb(139, 233, 253)) // cyan underline
+                                        );
+                                        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                                    }
+                                    if hyperlink_resp.clicked() {
+                                        debug!("User clicked subtitle path: {}", path_str);
+                                        // Open the folder containing the subtitle file
+                                        #[cfg(target_os = "windows")]
+                                        {
+                                            let _ = std::process::Command::new("explorer")
+                                                .arg("/select,")
+                                                .arg(sub_path)
+                                                .spawn();
+                                        }
+                                        #[cfg(target_os = "linux")]
+                                        {
+                                            let _ = std::process::Command::new("xdg-open")
+                                                .arg(sub_path.parent().unwrap_or_else(|| std::path::Path::new(".")))
+                                                .spawn();
+                                        }
+                                        #[cfg(target_os = "macos")]
+                                        {
+                                            let _ = std::process::Command::new("open")
+                                                .arg("-R")
+                                                .arg(sub_path)
+                                                .spawn();
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                    });
+            }
+
+            if !self.folder_path.is_empty() {
+                ui.separator();
+            }
+
+            ui.label(&self.status);
+
+            // Show progress bar only when downloads are active or complete
+            if self.is_downloading || (!self.downloading && self.total_downloads > 0) {
+                if self.total_downloads > 0 {
+                    ui.add_space(10.0);
+                    ui.label(format!("Progress: {} / {}", self.downloads_completed, self.total_downloads));
+                }
+            }
+            // Place the progress bar here, outside the ScrollArea. always fit the window
+            if (self.is_downloading || (!self.downloading && self.total_downloads > 0)) && self.total_downloads > 0 {
+                let progress = self.downloads_completed as f32 / self.total_downloads as f32;
+                let window_width = ui.ctx().screen_rect().width();
+                let progress_bar = egui::ProgressBar::new(progress)
+                    .show_percentage()
+                    .fill(egui::Color32::from_rgb(124, 99, 160)) // #7c63a0
+                    .desired_width(window_width - 18.0);
+                ui.add(progress_bar);
+            }
         });
 
         // When scan finishes, start downloads automatically
