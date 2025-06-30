@@ -33,6 +33,36 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 // =========================
+// === Custom Log Macros
+// =========================
+macro_rules! info {
+    ($($arg:tt)*) => {
+        log_message("INFO", &format!($($arg)*));
+    };
+}
+macro_rules! warn {
+    ($($arg:tt)*) => {
+        log_message("WARN", &format!($($arg)*));
+    };
+}
+macro_rules! error {
+    ($($arg:tt)*) => {
+        log_message("ERROR", &format!($($arg)*));
+    };
+}
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        log_message("DEBUG", &format!($($arg)*));
+    };
+}
+
+// =========================
+// === Type Aliases
+// =========================
+type DownloadJobs = Arc<Mutex<Vec<DownloadJob>>>;
+type SharedPaths = Arc<Mutex<Vec<PathBuf>>>;
+
+// =========================
 // === Constants
 // =========================
 static VIDEO_EXTENSIONS: &[&str] = &[
@@ -110,6 +140,127 @@ fn save_settings(settings: &Settings) -> Result<(), String> {
         .map_err(|e| format!("Failed to write settings file: {}", e))?;
     debug!("Settings saved to {}", path.display());
     Ok(())
+}
+
+// =========================
+// === Logging Setup
+// =========================
+
+struct AsyncLogger {
+    sender: mpsc::Sender<LogMessage>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Clone)]
+enum LogMessage {
+    Info(String),
+    Warn(String),
+    Error(String),
+    Debug(String),
+    Shutdown,
+}
+
+impl AsyncLogger {
+    fn new() -> Result<Self, Box<dyn std::error::Error>> {
+        let (tx, rx) = mpsc::channel();
+        
+        // Get the directory where the executable is located
+        let exe_path = env::current_exe()?;
+        let exe_dir = exe_path.parent().ok_or("Failed to get executable directory")?;
+        let log_path = exe_dir.join("rustitles_log.txt");
+        
+        // Create or open the log file
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        
+        let handle = std::thread::spawn(move || {
+            let mut file = std::io::BufWriter::new(log_file);
+            let mut buffer = VecDeque::new();
+            
+            loop {
+                // Process messages in batches for better performance
+                while let Ok(msg) = rx.try_recv() {
+                    match msg {
+                        LogMessage::Shutdown => {
+                            // Flush any remaining messages
+                            for entry in buffer.drain(..) {
+                                let _ = writeln!(file, "{}", entry);
+                            }
+                            let _ = file.flush();
+                            return;
+                        }
+                        _ => {
+                            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                            let entry = match msg {
+                                LogMessage::Info(msg) => format!("[INFO {} src\\main.rs:0] {}", timestamp, msg),
+                                LogMessage::Warn(msg) => format!("[WARN {} src\\main.rs:0] {}", timestamp, msg),
+                                LogMessage::Error(msg) => format!("[ERROR {} src\\main.rs:0] {}", timestamp, msg),
+                                LogMessage::Debug(msg) => format!("[DEBUG {} src\\main.rs:0] {}", timestamp, msg),
+                                LogMessage::Shutdown => unreachable!(),
+                            };
+                            buffer.push_back(entry);
+                        }
+                    }
+                }
+                
+                // Flush buffer if it has enough entries or if we've been idle
+                if buffer.len() >= 10 {
+                    for entry in buffer.drain(..) {
+                        let _ = writeln!(file, "{}", entry);
+                    }
+                    let _ = file.flush();
+                }
+                
+                // Small sleep to prevent busy waiting
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+        
+        Ok(AsyncLogger {
+            sender: tx,
+            handle: Some(handle),
+        })
+    }
+    
+    fn log(&self, level: &str, message: &str) {
+        let msg = match level {
+            "INFO" => LogMessage::Info(message.to_string()),
+            "WARN" => LogMessage::Warn(message.to_string()),
+            "ERROR" => LogMessage::Error(message.to_string()),
+            "DEBUG" => LogMessage::Debug(message.to_string()),
+            _ => LogMessage::Info(message.to_string()),
+        };
+        
+        // Non-blocking send - if the channel is full, we just drop the message
+        let _ = self.sender.send(msg);
+    }
+    
+    fn shutdown(self) {
+        let _ = self.sender.send(LogMessage::Shutdown);
+        if let Some(handle) = self.handle {
+            let _ = handle.join();
+        }
+    }
+}
+
+// Global logger instance
+static LOGGER: Mutex<Option<AsyncLogger>> = Mutex::new(None);
+
+fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
+    let logger = AsyncLogger::new()?;
+    let mut guard = LOGGER.lock().map_err(|e| format!("Failed to lock logger: {}", e))?;
+    *guard = Some(logger);
+    Ok(())
+}
+
+fn log_message(level: &str, message: &str) {
+    if let Ok(guard) = LOGGER.lock() {
+        if let Some(logger) = &*guard {
+            logger.log(level, message);
+        }
+    }
 }
 
 // =========================
@@ -329,149 +480,122 @@ fn run_command_hidden(cmd: &str, args: &[&str], env_vars: &std::collections::Has
 }
 
 // =========================
-// === Logging Setup
+// === Subtitle File & Language Helpers
 // =========================
-
-struct AsyncLogger {
-    sender: mpsc::Sender<LogMessage>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-#[derive(Clone)]
-enum LogMessage {
-    Info(String),
-    Warn(String),
-    Error(String),
-    Debug(String),
-    Shutdown,
-}
-
-impl AsyncLogger {
-    fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        let (tx, rx) = mpsc::channel();
-        
-        // Get the directory where the executable is located
-        let exe_path = env::current_exe()?;
-        let exe_dir = exe_path.parent().ok_or("Failed to get executable directory")?;
-        let log_path = exe_dir.join("rustitles_log.txt");
-        
-        // Create or open the log file
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
-        
-        let handle = std::thread::spawn(move || {
-            let mut file = std::io::BufWriter::new(log_file);
-            let mut buffer = VecDeque::new();
-            
-            loop {
-                // Process messages in batches for better performance
-                while let Ok(msg) = rx.try_recv() {
-                    match msg {
-                        LogMessage::Shutdown => {
-                            // Flush any remaining messages
-                            for entry in buffer.drain(..) {
-                                let _ = writeln!(file, "{}", entry);
-                            }
-                            let _ = file.flush();
-                            return;
-                        }
-                        _ => {
-                            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                            let entry = match msg {
-                                LogMessage::Info(msg) => format!("[INFO {} src\\main.rs:0] {}", timestamp, msg),
-                                LogMessage::Warn(msg) => format!("[WARN {} src\\main.rs:0] {}", timestamp, msg),
-                                LogMessage::Error(msg) => format!("[ERROR {} src\\main.rs:0] {}", timestamp, msg),
-                                LogMessage::Debug(msg) => format!("[DEBUG {} src\\main.rs:0] {}", timestamp, msg),
-                                LogMessage::Shutdown => unreachable!(),
-                            };
-                            buffer.push_back(entry);
-                        }
-                    }
-                }
-                
-                // Flush buffer if it has enough entries or if we've been idle
-                if buffer.len() >= 10 {
-                    for entry in buffer.drain(..) {
-                        let _ = writeln!(file, "{}", entry);
-                    }
-                    let _ = file.flush();
-                }
-                
-                // Small sleep to prevent busy waiting
-                std::thread::sleep(std::time::Duration::from_millis(1));
+/// Find all subtitle files for a video and a set of languages.
+fn find_all_subtitle_files(video_path: &Path, langs: &[String]) -> Vec<PathBuf> {
+    let folder = match video_path.parent() {
+        Some(f) => f,
+        None => return Vec::new(),
+    };
+    let stem = match video_path.file_stem().and_then(|s| s.to_str()) {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let subtitle_extensions = ["srt", "sub", "ssa", "ass", "vtt"];
+    let mut found_subtitles = Vec::new();
+    
+    debug!("Searching for subtitle files for {} in {}", video_path.display(), folder.display());
+    
+    // Try language-specific first
+    for lang in langs {
+        for ext in &subtitle_extensions {
+            let candidate = folder.join(format!("{}.{}.{}", stem, lang, ext));
+            if candidate.exists() {
+                debug!("Found language-specific subtitle: {}", candidate.display());
+                found_subtitles.push(candidate);
+                break; // Found one for this language, move to next
             }
-        });
-        
-        Ok(AsyncLogger {
-            sender: tx,
-            handle: Some(handle),
-        })
-    }
-    
-    fn log(&self, level: &str, message: &str) {
-        let msg = match level {
-            "INFO" => LogMessage::Info(message.to_string()),
-            "WARN" => LogMessage::Warn(message.to_string()),
-            "ERROR" => LogMessage::Error(message.to_string()),
-            "DEBUG" => LogMessage::Debug(message.to_string()),
-            _ => LogMessage::Info(message.to_string()),
-        };
-        
-        // Non-blocking send - if the channel is full, we just drop the message
-        let _ = self.sender.send(msg);
-    }
-    
-    fn shutdown(self) {
-        let _ = self.sender.send(LogMessage::Shutdown);
-        if let Some(handle) = self.handle {
-            let _ = handle.join();
         }
     }
-}
-
-// Global logger instance
-static LOGGER: Mutex<Option<AsyncLogger>> = Mutex::new(None);
-
-fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
-    let logger = AsyncLogger::new()?;
-    let mut guard = LOGGER.lock().map_err(|e| format!("Failed to lock logger: {}", e))?;
-    *guard = Some(logger);
-    Ok(())
-}
-
-fn log_message(level: &str, message: &str) {
-    if let Ok(guard) = LOGGER.lock() {
-        if let Some(logger) = &*guard {
-            logger.log(level, message);
+    // Then try generic
+    for ext in &subtitle_extensions {
+        let candidate = folder.join(format!("{}.{}", stem, ext));
+        if candidate.exists() {
+            debug!("Found generic subtitle: {}", candidate.display());
+            found_subtitles.push(candidate);
+            break; // Found one generic, stop
         }
+    }
+    
+    if found_subtitles.is_empty() {
+        debug!("No subtitle files found for {}", video_path.display());
+    } else {
+        debug!("Found {} subtitle files for {}", found_subtitles.len(), video_path.display());
+    }
+    
+    found_subtitles
+}
+
+/// Convert a language code to a human-readable name.
+fn language_code_to_name(code: &str) -> &str {
+    match code {
+        "en" => "English",
+        "fr" => "French",
+        "es" => "Spanish",
+        "de" => "German",
+        "it" => "Italian",
+        "pt" => "Portuguese",
+        "nl" => "Dutch",
+        "pl" => "Polish",
+        "ru" => "Russian",
+        "sv" => "Swedish",
+        "fi" => "Finnish",
+        "da" => "Danish",
+        "no" => "Norwegian",
+        "cs" => "Czech",
+        "hu" => "Hungarian",
+        "ro" => "Romanian",
+        "he" => "Hebrew",
+        "ar" => "Arabic",
+        "ja" => "Japanese",
+        "ko" => "Korean",
+        "zh" => "Chinese",
+        "zh-cn" => "Chinese (Simplified)",
+        "zh-tw" => "Chinese (Traditional)",
+        _ => code,
     }
 }
 
-// Custom log macros that use our async logger
-macro_rules! info {
-    ($($arg:tt)*) => {
-        log_message("INFO", &format!($($arg)*));
-    };
-}
-
-macro_rules! warn {
-    ($($arg:tt)*) => {
-        log_message("WARN", &format!($($arg)*));
-    };
-}
-
-macro_rules! error {
-    ($($arg:tt)*) => {
-        log_message("ERROR", &format!($($arg)*));
-    };
-}
-
-macro_rules! debug {
-    ($($arg:tt)*) => {
-        log_message("DEBUG", &format!($($arg)*));
-    };
+/// Check for embedded subtitles using ffprobe.
+fn has_embedded_subtitle(video_path: &std::path::Path, langs: &[String]) -> Option<String> {
+    use std::process::Command;
+    let mut cmd = Command::new("ffprobe");
+    cmd.arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("s")
+        .arg("-show_entries")
+        .arg("stream=index:stream_tags=language")
+        .arg("-of")
+        .arg("csv=p=0")
+        .arg(video_path);
+    // Hide the window on Windows
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let output = cmd.output();
+    if let Ok(output) = output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                // Each line: index,language (e.g., 0,eng)
+                let parts: Vec<&str> = line.split(',').collect();
+                if parts.len() >= 2 {
+                    let lang = parts[1].trim().to_lowercase();
+                    for req in langs {
+                        // Accept both 2-letter and 3-letter codes
+                        if lang == req.to_lowercase() || lang.starts_with(&req.to_lowercase()) {
+                            return Some(language_code_to_name(req).to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 // =========================
@@ -492,32 +616,42 @@ struct DownloadJob {
     subtitle_paths: Vec<PathBuf>,
 }
 
+/// Main application state for the subtitle downloader.
 struct SubtitleDownloader {
+    // --- Download state ---
     downloads_completed: usize,
     total_downloads: usize,
     is_downloading: bool,
+    downloading: bool,
+    download_thread_handle: Option<thread::JoinHandle<()>>,
+    cancel_flag: Arc<AtomicBool>,
+    download_jobs: DownloadJobs,
+
+    // --- Python/Subliminal state ---
     python_installed: bool,
     python_version: Option<String>,
     subliminal_installed: bool,
-    status: String,
     installing_python: bool,
     installing_subliminal: bool,
     python_install_result: Arc<Mutex<Option<Result<(), String>>>>,
     subliminal_install_result: Arc<Mutex<Option<Result<(), String>>>>,
+
+    // --- User settings ---
     selected_languages: Vec<String>,
     force_download: bool,
     overwrite_existing: bool,
-    folder_path: String,
-    scanned_videos: Arc<Mutex<Vec<PathBuf>>>,
-    videos_missing_subs: Arc<Mutex<Vec<PathBuf>>>,
-    scanning: bool,
-    scan_done_receiver: Option<Receiver<()>>,
-    download_jobs: Arc<Mutex<Vec<DownloadJob>>>,
-    downloading: bool,
-    download_thread_handle: Option<thread::JoinHandle<()>>,
-    cancel_flag: Arc<AtomicBool>,
     concurrent_downloads: usize,
     keep_dropdown_open: bool,
+
+    // --- Folder and scan state ---
+    folder_path: String,
+    scanned_videos: SharedPaths,
+    videos_missing_subs: SharedPaths,
+    scanning: bool,
+    scan_done_receiver: Option<Receiver<()>>,
+
+    // --- UI status ---
+    status: String,
 }
 
 impl Default for SubtitleDownloader {
@@ -564,14 +698,13 @@ impl Default for SubtitleDownloader {
             downloads_completed: 0,
             total_downloads: 0,
             is_downloading: false,
+            downloading: false,
+            download_thread_handle: None,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            download_jobs: Arc::new(Mutex::new(Vec::new())),
             python_installed,
             python_version,
             subliminal_installed,
-            status: if python_installed && !subliminal_installed {
-                "Python detected. Installing Subliminal...".to_string()
-            } else {
-                "Ready".to_string()
-            },
             installing_python: false,
             installing_subliminal,
             python_install_result: Arc::new(Mutex::new(None)),
@@ -579,22 +712,24 @@ impl Default for SubtitleDownloader {
             selected_languages: settings.selected_languages,
             force_download: settings.force_download,
             overwrite_existing: settings.overwrite_existing,
+            concurrent_downloads: settings.concurrent_downloads,
+            keep_dropdown_open: false,
             folder_path: String::new(),
             scanned_videos: Arc::new(Mutex::new(Vec::new())),
             videos_missing_subs: Arc::new(Mutex::new(Vec::new())),
             scanning: false,
             scan_done_receiver: None,
-            download_jobs: Arc::new(Mutex::new(Vec::new())),
-            downloading: false,
-            download_thread_handle: None,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
-            concurrent_downloads: settings.concurrent_downloads,
-            keep_dropdown_open: false,
+            status: if python_installed && !subliminal_installed {
+                "Python detected. Installing Subliminal...".to_string()
+            } else {
+                "Ready".to_string()
+            },
         }
     }
 }
 
 impl SubtitleDownloader {
+    /// Save the current user settings to disk.
     fn save_current_settings(&self) {
         let settings = Settings {
             selected_languages: self.selected_languages.clone(),
@@ -609,7 +744,7 @@ impl SubtitleDownloader {
             debug!("Settings saved successfully");
         }
     }
-
+    /// Returns true if the video is missing subtitles for any selected language.
     fn video_missing_subtitle(video_path: &Path, selected_languages: &[String]) -> bool {
         if let Some(stem) = video_path.file_stem().and_then(|s| s.to_str()) {
             let folder = video_path.parent().unwrap_or_else(|| Path::new(""));
@@ -649,7 +784,7 @@ impl SubtitleDownloader {
         }
         false // All selected languages have subtitles
     }
-
+    /// Scan the selected folder for video files and update the missing subtitles list.
     fn scan_folder(&mut self) {
         if self.folder_path.is_empty() || self.scanning {
             return;
@@ -718,7 +853,7 @@ impl SubtitleDownloader {
             let _ = tx.send(());
         });
     }
-
+    /// Start subtitle downloads for all videos missing subtitles.
     fn start_downloads(&mut self) {
         if self.downloading || self.selected_languages.is_empty() {
             self.status = "Select at least one language and ensure no downloads are in progress.".to_string();
@@ -943,7 +1078,7 @@ impl SubtitleDownloader {
             info!("Download thread completed");
         }));
     }
-
+    /// Check if all downloads are complete and update progress.
     fn check_download_completion(&mut self) {
         if !self.downloading {
             return;
@@ -988,124 +1123,8 @@ impl SubtitleDownloader {
     }
 }
 
-// Update the function to find all subtitle files for all languages
-fn find_all_subtitle_files(video_path: &Path, langs: &[String]) -> Vec<PathBuf> {
-    let folder = match video_path.parent() {
-        Some(f) => f,
-        None => return Vec::new(),
-    };
-    let stem = match video_path.file_stem().and_then(|s| s.to_str()) {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-    let subtitle_extensions = ["srt", "sub", "ssa", "ass", "vtt"];
-    let mut found_subtitles = Vec::new();
-    
-    debug!("Searching for subtitle files for {} in {}", video_path.display(), folder.display());
-    
-    // Try language-specific first
-    for lang in langs {
-        for ext in &subtitle_extensions {
-            let candidate = folder.join(format!("{}.{}.{}", stem, lang, ext));
-            if candidate.exists() {
-                debug!("Found language-specific subtitle: {}", candidate.display());
-                found_subtitles.push(candidate);
-                break; // Found one for this language, move to next
-            }
-        }
-    }
-    // Then try generic
-    for ext in &subtitle_extensions {
-        let candidate = folder.join(format!("{}.{}", stem, ext));
-        if candidate.exists() {
-            debug!("Found generic subtitle: {}", candidate.display());
-            found_subtitles.push(candidate);
-            break; // Found one generic, stop
-        }
-    }
-    
-    if found_subtitles.is_empty() {
-        debug!("No subtitle files found for {}", video_path.display());
-    } else {
-        debug!("Found {} subtitle files for {}", found_subtitles.len(), video_path.display());
-    }
-    
-    found_subtitles
-}
-
-// Add this helper function for language code to name
-fn language_code_to_name(code: &str) -> &str {
-    match code {
-        "en" => "English",
-        "fr" => "French",
-        "es" => "Spanish",
-        "de" => "German",
-        "it" => "Italian",
-        "pt" => "Portuguese",
-        "nl" => "Dutch",
-        "pl" => "Polish",
-        "ru" => "Russian",
-        "sv" => "Swedish",
-        "fi" => "Finnish",
-        "da" => "Danish",
-        "no" => "Norwegian",
-        "cs" => "Czech",
-        "hu" => "Hungarian",
-        "ro" => "Romanian",
-        "he" => "Hebrew",
-        "ar" => "Arabic",
-        "ja" => "Japanese",
-        "ko" => "Korean",
-        "zh" => "Chinese",
-        "zh-cn" => "Chinese (Simplified)",
-        "zh-tw" => "Chinese (Traditional)",
-        _ => code,
-    }
-}
-
-// === Embedded Subtitle Detection with ffprobe ===
-fn has_embedded_subtitle(video_path: &std::path::Path, langs: &[String]) -> Option<String> {
-    use std::process::Command;
-    let mut cmd = Command::new("ffprobe");
-    cmd.arg("-v")
-        .arg("error")
-        .arg("-select_streams")
-        .arg("s")
-        .arg("-show_entries")
-        .arg("stream=index:stream_tags=language")
-        .arg("-of")
-        .arg("csv=p=0")
-        .arg(video_path);
-    // Hide the window on Windows
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    let output = cmd.output();
-    if let Ok(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                // Each line: index,language (e.g., 0,eng)
-                let parts: Vec<&str> = line.split(',').collect();
-                if parts.len() >= 2 {
-                    let lang = parts[1].trim().to_lowercase();
-                    for req in langs {
-                        // Accept both 2-letter and 3-letter codes
-                        if lang == req.to_lowercase() || lang.starts_with(&req.to_lowercase()) {
-                            return Some(language_code_to_name(req).to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
 // =========================
-// === eframe::GUI Implementation
+// === eframe::App Implementation (GUI)
 // =========================
 impl eframe::App for SubtitleDownloader {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -1506,7 +1525,6 @@ impl eframe::App for SubtitleDownloader {
 
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
-
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         info!("Application closed by user");
         info!("");
