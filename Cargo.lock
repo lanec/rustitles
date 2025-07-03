@@ -3389,6 +3389,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "thiserror",
  "tokio",
  "which",
  "windows 0.56.0",

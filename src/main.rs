@@ -1,10 +1,33 @@
 //! Rustitles - Subtitle Downloader Tool
+//! 
+//! A desktop application for automatically downloading subtitles for video files.
+//! Built with Rust and egui for a native, cross-platform experience.
+//! 
+//! ## Features
+//! - Automatic subtitle download using Subliminal
+//! - Support for multiple languages
+//! - Batch processing of video folders
+//! - Embedded subtitle detection
+//! - Concurrent download management
+//! - Persistent settings and logging
+//! 
+//! ## Architecture
+//! - **Settings Management**: Persistent user preferences
+//! - **Logging System**: Asynchronous file-based logging
+//! - **Python Integration**: Automatic Python/Subliminal installation
+//! - **Subtitle Processing**: Video scanning and subtitle management
+//! - **GUI Framework**: egui-based user interface
+//! - **Error Handling**: Comprehensive error management
+//! - **Validation**: Input validation and sanitization
+//! - **Utilities**: Common helper functions
+//! 
 #![windows_subsystem = "windows"]
 
-// =========================
-// === Imports
-// =========================
-// --- Standard Library ---
+// =============================================================================
+// IMPORTS
+// =============================================================================
+
+// Standard library imports
 use std::collections::VecDeque;
 use std::env;
 use std::fs::File;
@@ -15,7 +38,8 @@ use std::ptr::null_mut;
 use std::sync::{mpsc::{self, Receiver}, Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-// --- Third-Party Crates ---
+
+// Third-party crate imports
 use eframe::egui;
 use image;
 use log::{info, warn, error, debug};
@@ -25,57 +49,85 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use winreg::enums::*;
 use winreg::RegKey;
-// --- Windows API ---
+
+// Windows API imports
 use windows::Win32::Foundation::{POINT, WPARAM, LPARAM};
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, GetMonitorInfoW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, SendMessageTimeoutW, HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG
 };
 
-// =========================
-// === Custom Log Macros
-// =========================
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+/// Supported video file extensions for subtitle scanning
+static VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "mpeg", "mpg", "webm", "m4v",
+    "3gp", "3g2", "asf", "mts", "m2ts", "ts", "vob", "ogv", "rm", "rmvb", 
+    "divx", "f4v", "mxf", "mp2", "mpv", "dat", "tod", "vro", "drc", "mng", 
+    "qt", "yuv", "viv", "amv", "nsv", "svi", "mpe", "mpv2", "m2v", "m1v", 
+    "m2p", "trp", "tp", "ps", "evo", "ogm", "ogx", "mod", "rec", "dvr-ms", 
+    "pva", "wtv", "m4p", "m4b", "m4r", "m4a", "3gpp", "3gpp2"
+];
+
+/// Default concurrent downloads
+static DEFAULT_CONCURRENT_DOWNLOADS: usize = 25;
+
+/// Maximum concurrent downloads
+static MAX_CONCURRENT_DOWNLOADS: usize = 100;
+
+/// Python installer URL
+static PYTHON_INSTALLER_URL: &str = "https://www.python.org/ftp/python/3.13.5/python-3.13.5-amd64.exe";
+
+/// Default window size
+static WINDOW_SIZE: [f32; 2] = [800.0, 530.0];
+
+/// Minimum window size
+static MIN_WINDOW_SIZE: [f32; 2] = [600.0, 461.0];
+
+// =============================================================================
+// TYPE ALIASES
+// =============================================================================
+
+type DownloadJobs = Arc<Mutex<Vec<DownloadJob>>>;
+type SharedPaths = Arc<Mutex<Vec<PathBuf>>>;
+
+// =============================================================================
+// CUSTOM LOG MACROS
+// =============================================================================
+
 macro_rules! info {
     ($($arg:tt)*) => {
         log_message("INFO", &format!($($arg)*));
     };
 }
+
 macro_rules! warn {
     ($($arg:tt)*) => {
         log_message("WARN", &format!($($arg)*));
     };
 }
+
 macro_rules! error {
     ($($arg:tt)*) => {
         log_message("ERROR", &format!($($arg)*));
     };
 }
+
 macro_rules! debug {
     ($($arg:tt)*) => {
         log_message("DEBUG", &format!($($arg)*));
     };
 }
 
-// =========================
-// === Type Aliases
-// =========================
-type DownloadJobs = Arc<Mutex<Vec<DownloadJob>>>;
-type SharedPaths = Arc<Mutex<Vec<PathBuf>>>;
+// =============================================================================
+// SETTINGS MANAGEMENT
+// =============================================================================
 
-// =========================
-// === Constants
-// =========================
-static VIDEO_EXTENSIONS: &[&str] = &[
-    "mp4", "mkv", "avi", "mov", "wmv", "flv", "mpeg", "mpg", "webm", "m4v",
-    "3gp", "3g2", "asf", "mts", "m2ts", "ts", "vob", "ogv", "rm", "rmvb", "divx", "f4v", "mxf",
-    "mp2", "mpv", "dat", "tod", "vro", "drc", "mng", "qt", "yuv", "viv", "amv", "nsv", "svi",
-    "mpe", "mpv2", "m2v", "m1v", "m2p", "trp", "tp", "ps", "evo", "ogm", "ogx", "mod", "rec",
-    "dvr-ms", "pva", "wtv", "m4p", "m4b", "m4r", "m4a", "3gpp", "3gpp2"
-];
-
-// =========================
-// === Settings Management
-// =========================
+/// Application settings that persist between sessions
 #[derive(Serialize, Deserialize, Clone)]
 struct Settings {
     selected_languages: Vec<String>,
@@ -90,67 +142,74 @@ impl Default for Settings {
             selected_languages: Vec::new(),
             force_download: false,
             overwrite_existing: false,
-            concurrent_downloads: 25,
+            concurrent_downloads: DEFAULT_CONCURRENT_DOWNLOADS,
         }
     }
 }
 
-fn get_settings_path() -> std::io::Result<PathBuf> {
-    let exe_path = env::current_exe()?;
-    let exe_dir = exe_path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to get executable directory")
-    })?;
-    Ok(exe_dir.join("rustitles_settings.json"))
-}
+impl Settings {
+    /// Get the path where settings are stored
+    fn get_path() -> std::io::Result<PathBuf> {
+        let exe_path = env::current_exe()?;
+        let exe_dir = exe_path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to get executable directory")
+        })?;
+        Ok(exe_dir.join("rustitles_settings.json"))
+    }
 
-fn load_settings() -> Settings {
-    match get_settings_path() {
-        Ok(path) => {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    match serde_json::from_str(&content) {
-                        Ok(settings) => {
-                            info!("Settings loaded from {}", path.display());
-                            settings
-                        }
-                        Err(e) => {
-                            warn!("Failed to parse settings file: {}. Using defaults.", e);
-                            Settings::default()
+    /// Load settings from disk, falling back to defaults if file doesn't exist
+    fn load() -> Self {
+        match Self::get_path() {
+            Ok(path) => {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        match serde_json::from_str(&content) {
+                            Ok(settings) => {
+                                info!("Settings loaded from {}", path.display());
+                                settings
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse settings file: {}. Using defaults.", e);
+                                Settings::default()
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    debug!("Settings file not found or unreadable: {}. Using defaults.", e);
-                    Settings::default()
+                    Err(e) => {
+                        debug!("Settings file not found or unreadable: {}. Using defaults.", e);
+                        Settings::default()
+                    }
                 }
             }
+            Err(e) => {
+                warn!("Failed to get settings path: {}. Using defaults.", e);
+                Settings::default()
+            }
         }
-        Err(e) => {
-            warn!("Failed to get settings path: {}. Using defaults.", e);
-            Settings::default()
-        }
+    }
+
+    /// Save settings to disk
+    fn save(&self) -> Result<(), String> {
+        let path = Self::get_path().map_err(|e| format!("Failed to get settings path: {}", e))?;
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("Failed to serialize settings: {}", e))?;
+        std::fs::write(&path, json)
+            .map_err(|e| format!("Failed to write settings file: {}", e))?;
+        debug!("Settings saved to {}", path.display());
+        Ok(())
     }
 }
 
-fn save_settings(settings: &Settings) -> Result<(), String> {
-    let path = get_settings_path().map_err(|e| format!("Failed to get settings path: {}", e))?;
-    let json = serde_json::to_string_pretty(settings)
-        .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("Failed to write settings file: {}", e))?;
-    debug!("Settings saved to {}", path.display());
-    Ok(())
-}
+// =============================================================================
+// LOGGING SYSTEM
+// =============================================================================
 
-// =========================
-// === Logging Setup
-// =========================
-
+/// Asynchronous logger that writes to file without blocking the main thread
 struct AsyncLogger {
     sender: mpsc::Sender<LogMessage>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Types of log messages that can be sent to the logger
 #[derive(Clone)]
 enum LogMessage {
     Info(String),
@@ -161,6 +220,7 @@ enum LogMessage {
 }
 
 impl AsyncLogger {
+    /// Create a new async logger that writes to a log file
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let (tx, rx) = mpsc::channel();
         
@@ -224,6 +284,7 @@ impl AsyncLogger {
         })
     }
     
+    /// Send a log message to the async logger
     fn log(&self, level: &str, message: &str) {
         let msg = match level {
             "INFO" => LogMessage::Info(message.to_string()),
@@ -237,6 +298,7 @@ impl AsyncLogger {
         let _ = self.sender.send(msg);
     }
     
+    /// Gracefully shutdown the logger
     fn shutdown(self) {
         let _ = self.sender.send(LogMessage::Shutdown);
         if let Some(handle) = self.handle {
@@ -248,6 +310,7 @@ impl AsyncLogger {
 // Global logger instance
 static LOGGER: Mutex<Option<AsyncLogger>> = Mutex::new(None);
 
+/// Initialize the global logging system
 fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     let logger = AsyncLogger::new()?;
     let mut guard = LOGGER.lock().map_err(|e| format!("Failed to lock logger: {}", e))?;
@@ -255,6 +318,7 @@ fn setup_logging() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Send a message to the global logger
 fn log_message(level: &str, message: &str) {
     if let Ok(guard) = LOGGER.lock() {
         if let Some(logger) = &*guard {
@@ -263,344 +327,408 @@ fn log_message(level: &str, message: &str) {
     }
 }
 
-// =========================
-// === Utility Functions (Python, Subliminal, Env)
-// =========================
-fn python_version() -> Option<String> {
-    for cmd in &["python", "py"] {
-        if let Ok(output) = run_command_hidden(cmd, &["--version"], &std::collections::HashMap::new()) {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                let version = if !stdout.is_empty() { stdout } else { stderr };
-                if version.to_lowercase().contains("python") {
-                    debug!("Found Python version: {} using command: {}", version, cmd);
-                    return Some(version);
+// =============================================================================
+// PYTHON & SUBLIMINAL MANAGEMENT
+// =============================================================================
+
+/// Python and Subliminal installation and management utilities
+struct PythonManager;
+
+impl PythonManager {
+    /// Check if Python is installed and return its version
+    fn get_version() -> Option<String> {
+        for cmd in &["python", "py"] {
+            if let Ok(output) = Self::run_command_hidden(cmd, &["--version"], &std::collections::HashMap::new()) {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    let version = if !stdout.is_empty() { stdout } else { stderr };
+                    if version.to_lowercase().contains("python") {
+                        debug!("Found Python version: {} using command: {}", version, cmd);
+                        return Some(version);
+                    }
                 }
             }
         }
+        debug!("No Python installation found");
+        None
     }
-    debug!("No Python installation found");
-    None
-}
 
-fn check_subliminal_installed() -> bool {
-    // First check if subliminal command is directly available
-    if let Ok(output) = run_command_hidden("subliminal", &["--version"], &std::collections::HashMap::new()) {
-        if output.status.success() {
-            debug!("Subliminal found as direct command");
-            return true;
-        }
-    }
-    
-    // Then check as Python module with multiple Python commands
-    for cmd in &["python", "py", "python3"] {
-        if let Ok(output) = run_command_hidden(cmd, &["-m", "pip", "show", "subliminal"], &std::collections::HashMap::new()) {
+    /// Check if Subliminal is installed
+    fn is_subliminal_installed() -> bool {
+        // First check if subliminal command is directly available
+        if let Ok(output) = Self::run_command_hidden("subliminal", &["--version"], &std::collections::HashMap::new()) {
             if output.status.success() {
-                debug!("Subliminal found via pip show using {}", cmd);
+                debug!("Subliminal found as direct command");
                 return true;
             }
         }
         
-        // Also try direct module import
-        if let Ok(output) = run_command_hidden(cmd, &["-c", "import subliminal; print('subliminal available')"], &std::collections::HashMap::new()) {
-            if output.status.success() {
-                debug!("Subliminal found via direct import using {}", cmd);
-                return true;
-            }
-        }
-    }
-    debug!("Subliminal not found");
-    false
-}
-
-fn install_subliminal() -> bool {
-    info!("Installing Subliminal via pip");
-    for cmd in &["python", "py", "python3"] {
-        if let Ok(output) = run_command_hidden(cmd, &["-m", "pip", "install", "subliminal"], &std::collections::HashMap::new()) {
-            if output.status.success() {
-                info!("Subliminal installed successfully using {}", cmd);
-                return true;
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("Failed to install Subliminal using {}: {}", cmd, stderr);
-            }
-        }
-    }
-    error!("Failed to install Subliminal with all Python commands");
-    false
-}
-
-fn add_scripts_to_path() -> Result<(), String> {
-    let mut base_path = None;
-
-    for cmd in &["python", "py"] {
-        let output = run_command_hidden(cmd, &["-m", "site", "--user-base"], &std::collections::HashMap::new());
-
-        match output {
-            Ok(output) if output.status.success() => {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    base_path = Some(path);
-                    break;
+        // Then check as Python module with multiple Python commands
+        for cmd in &["python", "py", "python3"] {
+            if let Ok(output) = Self::run_command_hidden(cmd, &["-m", "pip", "show", "subliminal"], &std::collections::HashMap::new()) {
+                if output.status.success() {
+                    debug!("Subliminal found via pip show using {}", cmd);
+                    return true;
                 }
             }
-            Ok(output) => {
-                let err = String::from_utf8_lossy(&output.stderr);
-                eprintln!("Failed to get user base with {}: {}", cmd, err);
-            }
-            Err(e) => {
-                eprintln!("Failed to execute {}: {}", cmd, e);
+            
+            // Also try direct module import
+            if let Ok(output) = Self::run_command_hidden(cmd, &["-c", "import subliminal; print('subliminal available')"], &std::collections::HashMap::new()) {
+                if output.status.success() {
+                    debug!("Subliminal found via direct import using {}", cmd);
+                    return true;
+                }
             }
         }
+        debug!("Subliminal not found");
+        false
     }
 
-    let base_path = base_path.ok_or_else(|| "Failed to get user base path from python/py".to_string())?;
-    let scripts_path = format!("{}\\Scripts", base_path);
+    /// Install Subliminal via pip
+    fn install_subliminal() -> bool {
+        info!("Installing Subliminal via pip");
+        for cmd in &["python", "py", "python3"] {
+            if let Ok(output) = Self::run_command_hidden(cmd, &["-m", "pip", "install", "subliminal"], &std::collections::HashMap::new()) {
+                if output.status.success() {
+                    info!("Subliminal installed successfully using {}", cmd);
+                    return true;
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    warn!("Failed to install Subliminal using {}: {}", cmd, stderr);
+                }
+            }
+        }
+        error!("Failed to install Subliminal with all Python commands");
+        false
+    }
 
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let env = hkcu.open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
-        .map_err(|e| format!("Failed to open registry: {}", e))?;
+    /// Add Python Scripts directory to PATH
+    fn add_scripts_to_path() -> Result<(), String> {
+        let mut base_path = None;
 
-    let current_path: String = env.get_value("Path").unwrap_or_else(|_| "".into());
+        for cmd in &["python", "py"] {
+            let output = Self::run_command_hidden(cmd, &["-m", "site", "--user-base"], &std::collections::HashMap::new());
 
-    if !current_path.to_lowercase().contains(&scripts_path.to_lowercase()) {
-        let new_path = if current_path.trim().is_empty() {
-            scripts_path.clone()
+            match output {
+                Ok(output) if output.status.success() => {
+                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if !path.is_empty() {
+                        base_path = Some(path);
+                        break;
+                    }
+                }
+                Ok(output) => {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    eprintln!("Failed to get user base with {}: {}", cmd, err);
+                }
+                Err(e) => {
+                    eprintln!("Failed to execute {}: {}", cmd, e);
+                }
+            }
+        }
+
+        let base_path = base_path.ok_or_else(|| "Failed to get user base path from python/py".to_string())?;
+        let scripts_path = format!("{}\\Scripts", base_path);
+
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let env = hkcu.open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
+            .map_err(|e| format!("Failed to open registry: {}", e))?;
+
+        let current_path: String = env.get_value("Path").unwrap_or_else(|_| "".into());
+
+        if !current_path.to_lowercase().contains(&scripts_path.to_lowercase()) {
+            let new_path = if current_path.trim().is_empty() {
+                scripts_path.clone()
+            } else {
+                format!("{current_path};{scripts_path}")
+            };
+
+            env.set_value("Path", &new_path)
+                .map_err(|e| format!("Failed to set PATH: {}", e))?;
+
+            unsafe {
+                let param = "Environment\0"
+                    .encode_utf16()
+                    .collect::<Vec<u16>>();
+
+                SendMessageTimeoutW(
+                    HWND_BROADCAST,
+                    WM_SETTINGCHANGE,
+                    WPARAM(0),
+                    LPARAM(param.as_ptr() as isize),
+                    SMTO_ABORTIFHUNG,
+                    5000,
+                    Some(null_mut()),
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Refresh environment variables to pick up PATH changes
+    fn refresh_environment() -> Result<(), String> {
+        // Get the updated PATH from registry
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let env = hkcu.open_subkey_with_flags("Environment", KEY_READ)
+            .map_err(|e| format!("Failed to open registry: {}", e))?;
+
+        let user_path: String = env.get_value("Path").unwrap_or_else(|_| "".into());
+        
+        // Get system PATH
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let sys_env = hklm.open_subkey_with_flags("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", KEY_READ)
+            .map_err(|e| format!("Failed to open system registry: {}", e))?;
+        
+        let system_path: String = sys_env.get_value("Path").unwrap_or_else(|_| "".into());
+        
+        // Combine system and user paths
+        let combined_path = if system_path.trim().is_empty() {
+            user_path
+        } else if user_path.trim().is_empty() {
+            system_path
         } else {
-            format!("{current_path};{scripts_path}")
+            format!("{system_path};{user_path}")
         };
+        
+        // Update current process environment
+        std::env::set_var("PATH", combined_path);
+        
+        Ok(())
+    }
 
-        env.set_value("Path", &new_path)
-            .map_err(|e| format!("Failed to set PATH: {}", e))?;
+    /// Download Python installer from official website
+    fn download_installer() -> io::Result<PathBuf> {
+        let url = PYTHON_INSTALLER_URL;
+        let response = get(url).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        unsafe {
-            let param = "Environment\0"
-                .encode_utf16()
-                .collect::<Vec<u16>>();
+        let temp_dir = env::temp_dir();
+        let installer_path = temp_dir.join("python-installer.exe");
+        let mut file = File::create(&installer_path)?;
+        let bytes = response.bytes().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        file.write_all(&bytes)?;
+        Ok(installer_path)
+    }
 
-            SendMessageTimeoutW(
-                HWND_BROADCAST,
-                WM_SETTINGCHANGE,
-                WPARAM(0),
-                LPARAM(param.as_ptr() as isize),
-                SMTO_ABORTIFHUNG,
-                5000,
-                Some(null_mut()),
-            );
+    /// Install Python silently with required options
+    fn install_silent(installer_path: &PathBuf) -> io::Result<bool> {
+        let mut command = Command::new(installer_path);
+        command.args(&[
+            "/quiet",
+            "InstallAllUsers=1",
+            "PrependPath=1",
+            "Include_pip=1",
+        ]);
+        
+        // On Windows, try to hide the console window
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
+        
+        let status = command.status()?;
+        Ok(status.success())
     }
 
-    Ok(())
-}
-
-fn refresh_environment() -> Result<(), String> {
-    // Get the updated PATH from registry
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let env = hkcu.open_subkey_with_flags("Environment", KEY_READ)
-        .map_err(|e| format!("Failed to open registry: {}", e))?;
-
-    let user_path: String = env.get_value("Path").unwrap_or_else(|_| "".into());
-    
-    // Get system PATH
-    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-    let sys_env = hklm.open_subkey_with_flags("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", KEY_READ)
-        .map_err(|e| format!("Failed to open system registry: {}", e))?;
-    
-    let system_path: String = sys_env.get_value("Path").unwrap_or_else(|_| "".into());
-    
-    // Combine system and user paths
-    let combined_path = if system_path.trim().is_empty() {
-        user_path
-    } else if user_path.trim().is_empty() {
-        system_path
-    } else {
-        format!("{system_path};{user_path}")
-    };
-    
-    // Update current process environment
-    std::env::set_var("PATH", combined_path);
-    
-    Ok(())
-}
-
-fn download_python_installer() -> io::Result<PathBuf> {
-    let url = "https://www.python.org/ftp/python/3.13.5/python-3.13.5-amd64.exe";
-    let response = get(url).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
-    let temp_dir = env::temp_dir();
-    let installer_path = temp_dir.join("python-installer.exe");
-    let mut file = File::create(&installer_path)?;
-    let bytes = response.bytes().map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-    file.write_all(&bytes)?;
-    Ok(installer_path)
-}
-
-fn install_python_silent(installer_path: &PathBuf) -> io::Result<bool> {
-    let mut command = Command::new(installer_path);
-    command.args(&[
-        "/quiet",
-        "InstallAllUsers=1",
-        "PrependPath=1",
-        "Include_pip=1",
-    ]);
-    
-    // On Windows, try to hide the console window
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    /// Ensure Subliminal cache directory exists
+    fn ensure_cache_dir() -> io::Result<PathBuf> {
+        let cache_dir = env::temp_dir().join("subliminal_cache");
+        std::fs::create_dir_all(&cache_dir)?;
+        Ok(cache_dir)
     }
-    
-    let status = command.status()?;
-    Ok(status.success())
-}
 
-fn ensure_subliminal_cache_dir() -> io::Result<PathBuf> {
-    let cache_dir = env::temp_dir().join("subliminal_cache");
-    std::fs::create_dir_all(&cache_dir)?;
-    Ok(cache_dir)
-}
-
-fn run_command_hidden(cmd: &str, args: &[&str], env_vars: &std::collections::HashMap<String, String>) -> io::Result<std::process::Output> {
-    let mut command = Command::new(cmd);
-    command.envs(env_vars);
-    command.args(args);
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    
-    // On Windows, try to hide the console window
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    /// Run a command with hidden console window
+    fn run_command_hidden(cmd: &str, args: &[&str], env_vars: &std::collections::HashMap<String, String>) -> io::Result<std::process::Output> {
+        let mut command = Command::new(cmd);
+        command.envs(env_vars);
+        command.args(args);
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        
+        // On Windows, try to hide the console window
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        
+        command.output()
     }
-    
-    command.output()
 }
 
-// =========================
-// === Subtitle File & Language Helpers
-// =========================
-/// Find all subtitle files for a video and a set of languages.
-fn find_all_subtitle_files(video_path: &Path, langs: &[String]) -> Vec<PathBuf> {
-    let folder = match video_path.parent() {
-        Some(f) => f,
-        None => return Vec::new(),
-    };
-    let stem = match video_path.file_stem().and_then(|s| s.to_str()) {
-        Some(s) => s,
-        None => return Vec::new(),
-    };
-    let subtitle_extensions = ["srt", "sub", "ssa", "ass", "vtt"];
-    let mut found_subtitles = Vec::new();
-    
-    debug!("Searching for subtitle files for {} in {}", video_path.display(), folder.display());
-    
-    // Try language-specific first
-    for lang in langs {
-        for ext in &subtitle_extensions {
-            let candidate = folder.join(format!("{}.{}.{}", stem, lang, ext));
-            if candidate.exists() {
-                debug!("Found language-specific subtitle: {}", candidate.display());
-                found_subtitles.push(candidate);
-                break; // Found one for this language, move to next
+// =============================================================================
+// SUBTITLE UTILITIES
+// =============================================================================
+
+/// Utilities for working with subtitle files and language detection
+struct SubtitleUtils;
+
+impl SubtitleUtils {
+    /// Find all subtitle files for a video and a set of languages
+    fn find_all_subtitle_files(video_path: &Path, langs: &[String]) -> Vec<PathBuf> {
+        let folder = match video_path.parent() {
+            Some(f) => f,
+            None => return Vec::new(),
+        };
+        let stem = match video_path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let subtitle_extensions = ["srt", "sub", "ssa", "ass", "vtt"];
+        let mut found_subtitles = Vec::new();
+        
+        debug!("Searching for subtitle files for {} in {}", video_path.display(), folder.display());
+        
+        // Try language-specific first
+        for lang in langs {
+            for ext in &subtitle_extensions {
+                let candidate = folder.join(format!("{}.{}.{}", stem, lang, ext));
+                if candidate.exists() {
+                    debug!("Found language-specific subtitle: {}", candidate.display());
+                    found_subtitles.push(candidate);
+                    break; // Found one for this language, move to next
+                }
             }
         }
+        // Then try generic
+        for ext in &subtitle_extensions {
+            let candidate = folder.join(format!("{}.{}", stem, ext));
+            if candidate.exists() {
+                debug!("Found generic subtitle: {}", candidate.display());
+                found_subtitles.push(candidate);
+                break; // Found one generic, stop
+            }
+        }
+        
+        if found_subtitles.is_empty() {
+            debug!("No subtitle files found for {}", video_path.display());
+        } else {
+            debug!("Found {} subtitle files for {}", found_subtitles.len(), video_path.display());
+        }
+        
+        found_subtitles
     }
-    // Then try generic
-    for ext in &subtitle_extensions {
-        let candidate = folder.join(format!("{}.{}", stem, ext));
-        if candidate.exists() {
-            debug!("Found generic subtitle: {}", candidate.display());
-            found_subtitles.push(candidate);
-            break; // Found one generic, stop
+
+    /// Convert a language code to a human-readable name
+    fn language_code_to_name(code: &str) -> &str {
+        match code {
+            "en" => "English",
+            "fr" => "French",
+            "es" => "Spanish",
+            "de" => "German",
+            "it" => "Italian",
+            "pt" => "Portuguese",
+            "nl" => "Dutch",
+            "pl" => "Polish",
+            "ru" => "Russian",
+            "sv" => "Swedish",
+            "fi" => "Finnish",
+            "da" => "Danish",
+            "no" => "Norwegian",
+            "cs" => "Czech",
+            "hu" => "Hungarian",
+            "ro" => "Romanian",
+            "he" => "Hebrew",
+            "ar" => "Arabic",
+            "ja" => "Japanese",
+            "ko" => "Korean",
+            "zh" => "Chinese",
+            "zh-cn" => "Chinese (Simplified)",
+            "zh-tw" => "Chinese (Traditional)",
+            _ => code,
         }
     }
-    
-    if found_subtitles.is_empty() {
-        debug!("No subtitle files found for {}", video_path.display());
-    } else {
-        debug!("Found {} subtitle files for {}", found_subtitles.len(), video_path.display());
-    }
-    
-    found_subtitles
-}
 
-/// Convert a language code to a human-readable name.
-fn language_code_to_name(code: &str) -> &str {
-    match code {
-        "en" => "English",
-        "fr" => "French",
-        "es" => "Spanish",
-        "de" => "German",
-        "it" => "Italian",
-        "pt" => "Portuguese",
-        "nl" => "Dutch",
-        "pl" => "Polish",
-        "ru" => "Russian",
-        "sv" => "Swedish",
-        "fi" => "Finnish",
-        "da" => "Danish",
-        "no" => "Norwegian",
-        "cs" => "Czech",
-        "hu" => "Hungarian",
-        "ro" => "Romanian",
-        "he" => "Hebrew",
-        "ar" => "Arabic",
-        "ja" => "Japanese",
-        "ko" => "Korean",
-        "zh" => "Chinese",
-        "zh-cn" => "Chinese (Simplified)",
-        "zh-tw" => "Chinese (Traditional)",
-        _ => code,
-    }
-}
-
-/// Check for embedded subtitles using ffprobe.
-fn has_embedded_subtitle(video_path: &std::path::Path, langs: &[String]) -> Option<String> {
-    use std::process::Command;
-    let mut cmd = Command::new("ffprobe");
-    cmd.arg("-v")
-        .arg("error")
-        .arg("-select_streams")
-        .arg("s")
-        .arg("-show_entries")
-        .arg("stream=index:stream_tags=language")
-        .arg("-of")
-        .arg("csv=p=0")
-        .arg(video_path);
-    // Hide the window on Windows
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    let output = cmd.output();
-    if let Ok(output) = output {
-        if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                // Each line: index,language (e.g., 0,eng)
-                let parts: Vec<&str> = line.split(',').collect();
-                if parts.len() >= 2 {
-                    let lang = parts[1].trim().to_lowercase();
-                    for req in langs {
-                        // Accept both 2-letter and 3-letter codes
-                        if lang == req.to_lowercase() || lang.starts_with(&req.to_lowercase()) {
-                            return Some(language_code_to_name(req).to_string());
+    /// Check for embedded subtitles using ffprobe
+    fn has_embedded_subtitle(video_path: &std::path::Path, langs: &[String]) -> Option<String> {
+        use std::process::Command;
+        let mut cmd = Command::new("ffprobe");
+        cmd.arg("-v")
+            .arg("error")
+            .arg("-select_streams")
+            .arg("s")
+            .arg("-show_entries")
+            .arg("stream=index:stream_tags=language")
+            .arg("-of")
+            .arg("csv=p=0")
+            .arg(video_path);
+        // Hide the window on Windows
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        let output = cmd.output();
+        if let Ok(output) = output {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    // Each line: index,language (e.g., 0,eng)
+                    let parts: Vec<&str> = line.split(',').collect();
+                    if parts.len() >= 2 {
+                        let lang = parts[1].trim().to_lowercase();
+                        for req in langs {
+                            // Accept both 2-letter and 3-letter codes
+                            if lang == req.to_lowercase() || lang.starts_with(&req.to_lowercase()) {
+                                return Some(Self::language_code_to_name(req).to_string());
+                            }
                         }
                     }
                 }
             }
         }
+        None
     }
-    None
+
+    /// Check if a video is missing subtitles for any selected language
+    fn video_missing_subtitle(video_path: &Path, selected_languages: &[String]) -> bool {
+        if let Some(stem) = video_path.file_stem().and_then(|s| s.to_str()) {
+            let folder = video_path.parent().unwrap_or_else(|| Path::new(""));
+            
+            // Check for common subtitle extensions
+            let subtitle_extensions = ["srt", "sub", "ssa", "ass", "vtt"];
+            
+            // Check if any of the selected languages are missing
+            for lang in selected_languages {
+                let mut lang_found = false;
+                
+                // Check for language-specific patterns first (e.g., video.en.srt)
+                for ext in &subtitle_extensions {
+                    let subtitle_path = folder.join(format!("{}.{}.{}", stem, lang, ext));
+                    if subtitle_path.exists() {
+                        lang_found = true;
+                        break;
+                    }
+                }
+                
+                // If language-specific not found, check basic pattern (e.g., video.srt)
+                if !lang_found {
+                    for ext in &subtitle_extensions {
+                        let subtitle_path = folder.join(format!("{}.{}", stem, ext));
+                        if subtitle_path.exists() {
+                            lang_found = true;
+                            break;
+                        }
+                    }
+                }
+                
+                // If this language is missing, return true (missing subtitles)
+                if !lang_found {
+                    return true;
+                }
+            }
+        }
+        false // All selected languages have subtitles
+    }
 }
 
-// =========================
-// === App State Structs & Enums
-// =========================
+// =============================================================================
+// DATA STRUCTURES
+// =============================================================================
+
+/// Status of a subtitle download job
 #[derive(Clone, PartialEq)]
 enum JobStatus {
     Pending,
@@ -610,15 +738,16 @@ enum JobStatus {
     Failed(String),
 }
 
+/// Represents a single subtitle download job
 struct DownloadJob {
     video_path: PathBuf,
     status: JobStatus,
     subtitle_paths: Vec<PathBuf>,
 }
 
-/// Main application state for the subtitle downloader.
+/// Main application state for the subtitle downloader
 struct SubtitleDownloader {
-    // --- Download state ---
+    // Download state
     downloads_completed: usize,
     total_downloads: usize,
     is_downloading: bool,
@@ -627,7 +756,7 @@ struct SubtitleDownloader {
     cancel_flag: Arc<AtomicBool>,
     download_jobs: DownloadJobs,
 
-    // --- Python/Subliminal state ---
+    // Python/Subliminal state
     python_installed: bool,
     python_version: Option<String>,
     subliminal_installed: bool,
@@ -636,21 +765,21 @@ struct SubtitleDownloader {
     python_install_result: Arc<Mutex<Option<Result<(), String>>>>,
     subliminal_install_result: Arc<Mutex<Option<Result<(), String>>>>,
 
-    // --- User settings ---
+    // User settings
     selected_languages: Vec<String>,
     force_download: bool,
     overwrite_existing: bool,
     concurrent_downloads: usize,
     keep_dropdown_open: bool,
 
-    // --- Folder and scan state ---
+    // Folder and scan state
     folder_path: String,
     scanned_videos: SharedPaths,
     videos_missing_subs: SharedPaths,
     scanning: bool,
     scan_done_receiver: Option<Receiver<()>>,
 
-    // --- UI status ---
+    // UI status
     status: String,
 }
 
@@ -659,14 +788,14 @@ impl Default for SubtitleDownloader {
         info!("Initializing SubtitleDownloader");
         
         // Load saved settings
-        let settings = load_settings();
+        let settings = Settings::load();
         info!("Loaded settings: languages={:?}, force={}, overwrite={}, concurrent={}", 
               settings.selected_languages, settings.force_download, settings.overwrite_existing, settings.concurrent_downloads);
         
-        let python_version = python_version();
+        let python_version = PythonManager::get_version();
         let python_installed = python_version.is_some();
         let subliminal_installed = if python_installed {
-            check_subliminal_installed()
+            PythonManager::is_subliminal_installed()
         } else {
             false
         };
@@ -681,9 +810,9 @@ impl Default for SubtitleDownloader {
             info!("Starting automatic Subliminal installation");
             let result_ptr = Arc::clone(&subliminal_install_result);
             std::thread::spawn(move || {
-                let success = install_subliminal();
+                let success = PythonManager::install_subliminal();
                 let result = if success {
-                    match add_scripts_to_path() {
+                    match PythonManager::add_scripts_to_path() {
                         Ok(_) => Ok(()),
                         Err(e) => Err(format!("Subliminal installed, but failed to update PATH: {}", e)),
                     }
@@ -729,7 +858,7 @@ impl Default for SubtitleDownloader {
 }
 
 impl SubtitleDownloader {
-    /// Save the current user settings to disk.
+    /// Save the current user settings to disk
     fn save_current_settings(&self) {
         let settings = Settings {
             selected_languages: self.selected_languages.clone(),
@@ -738,53 +867,14 @@ impl SubtitleDownloader {
             concurrent_downloads: self.concurrent_downloads,
         };
         
-        if let Err(e) = save_settings(&settings) {
+        if let Err(e) = settings.save() {
             warn!("Failed to save settings: {}", e);
         } else {
             debug!("Settings saved successfully");
         }
     }
-    /// Returns true if the video is missing subtitles for any selected language.
-    fn video_missing_subtitle(video_path: &Path, selected_languages: &[String]) -> bool {
-        if let Some(stem) = video_path.file_stem().and_then(|s| s.to_str()) {
-            let folder = video_path.parent().unwrap_or_else(|| Path::new(""));
-            
-            // Check for common subtitle extensions
-            let subtitle_extensions = ["srt", "sub", "ssa", "ass", "vtt"];
-            
-            // Check if any of the selected languages are missing
-            for lang in selected_languages {
-                let mut lang_found = false;
-                
-                // Check for language-specific patterns first (e.g., video.en.srt)
-                for ext in &subtitle_extensions {
-                    let subtitle_path = folder.join(format!("{}.{}.{}", stem, lang, ext));
-                    if subtitle_path.exists() {
-                        lang_found = true;
-                        break;
-                    }
-                }
-                
-                // If language-specific not found, check basic pattern (e.g., video.srt)
-                if !lang_found {
-                    for ext in &subtitle_extensions {
-                        let subtitle_path = folder.join(format!("{}.{}", stem, ext));
-                        if subtitle_path.exists() {
-                            lang_found = true;
-                            break;
-                        }
-                    }
-                }
-                
-                // If this language is missing, return true (missing subtitles)
-                if !lang_found {
-                    return true;
-                }
-            }
-        }
-        false // All selected languages have subtitles
-    }
-    /// Scan the selected folder for video files and update the missing subtitles list.
+
+    /// Scan the selected folder for video files and update the missing subtitles list
     fn scan_folder(&mut self) {
         if self.folder_path.is_empty() || self.scanning {
             return;
@@ -821,10 +911,8 @@ impl SubtitleDownloader {
                         let path = entry.path();
                         if path.is_dir() {
                             visit_dirs(&path, videos);
-                        } else if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                            if VIDEO_EXTENSIONS.iter().any(|&v| v.eq_ignore_ascii_case(ext)) {
-                                videos.push(path);
-                            }
+                        } else if Utils::is_video_file(&path) {
+                            videos.push(path);
                         }
                     }
                 }
@@ -839,7 +927,7 @@ impl SubtitleDownloader {
             } else {
                 // Only include videos that are missing subtitles
                 for video in &found_videos {
-                    if SubtitleDownloader::video_missing_subtitle(video, &selected_languages) {
+                    if SubtitleUtils::video_missing_subtitle(video, &selected_languages) {
                         missing_subtitles.push(video.clone());
                     }
                 }
@@ -853,7 +941,8 @@ impl SubtitleDownloader {
             let _ = tx.send(());
         });
     }
-    /// Start subtitle downloads for all videos missing subtitles.
+
+    /// Start subtitle downloads for all videos missing subtitles
     fn start_downloads(&mut self) {
         if self.downloading || self.selected_languages.is_empty() {
             self.status = "Select at least one language and ensure no downloads are in progress.".to_string();
@@ -942,7 +1031,7 @@ impl SubtitleDownloader {
                         debug!("Processing video: {}", job_path.display());
 
                         // Create cache directory and set environment variables to fix DBM cache issues on Windows
-                        let cache_dir = ensure_subliminal_cache_dir().unwrap_or_else(|_| env::temp_dir().join("subliminal_cache"));
+                        let cache_dir = PythonManager::ensure_cache_dir().unwrap_or_else(|_| env::temp_dir().join("subliminal_cache"));
                         let mut env_vars = std::collections::HashMap::<String, String>::new();
                         env_vars.insert("PYTHONIOENCODING".to_string(), "utf-8".to_string());
                         env_vars.insert("SUBLIMINAL_CACHE_DIR".to_string(), cache_dir.to_string_lossy().to_string());
@@ -967,24 +1056,24 @@ impl SubtitleDownloader {
                         
                         debug!("Running subliminal command: subliminal {}", all_args.join(" "));
                         
-                        let output = run_command_hidden("subliminal", &all_args, &env_vars)
+                        let output = PythonManager::run_command_hidden("subliminal", &all_args, &env_vars)
                             .or_else(|_| {
                                 debug!("Subliminal direct command failed, trying python -m subliminal");
                                 let mut python_args = vec!["-m", "subliminal"];
                                 python_args.extend(&all_args);
-                                run_command_hidden("python", &python_args, &env_vars)
+                                PythonManager::run_command_hidden("python", &python_args, &env_vars)
                             })
                             .or_else(|_| {
                                 debug!("Python command failed, trying py -m subliminal");
                                 let mut python_args = vec!["-m", "subliminal"];
                                 python_args.extend(&all_args);
-                                run_command_hidden("py", &python_args, &env_vars)
+                                PythonManager::run_command_hidden("py", &python_args, &env_vars)
                             })
                             .or_else(|_| {
                                 debug!("Py command failed, trying python3 -m subliminal");
                                 let mut python_args = vec!["-m", "subliminal"];
                                 python_args.extend(&all_args);
-                                run_command_hidden("python3", &python_args, &env_vars)
+                                PythonManager::run_command_hidden("python3", &python_args, &env_vars)
                             });
 
                         let mut jobs_lock = jobs_clone.lock().unwrap();
@@ -997,7 +1086,7 @@ impl SubtitleDownloader {
                             let stdout_str = String::from_utf8_lossy(&out.stdout).to_lowercase();
                             let stderr_str = String::from_utf8_lossy(&out.stderr).to_lowercase();
                             let combined_output = format!("{}\n{}", stdout_str, stderr_str).trim().to_string();
-                            let subtitle_paths = find_all_subtitle_files(&job_path, &langs_clone);
+                            let subtitle_paths = SubtitleUtils::find_all_subtitle_files(&job_path, &langs_clone);
                             
                             // --- LOGGING: Full Subliminal output ---
                             info!("Subliminal output for {}:\n{}", job_path.display(), combined_output);
@@ -1026,11 +1115,11 @@ impl SubtitleDownloader {
                                         job.status = JobStatus::Success;
                                     } else if !force_download {
                                         // Only check for embedded if not forcing download
-                                        if let Some(lang_name) = has_embedded_subtitle(&job_path, &langs_clone) {
+                                        if let Some(lang_name) = SubtitleUtils::has_embedded_subtitle(&job_path, &langs_clone) {
                                             job.status = JobStatus::EmbeddedExists(format!("Embedded {} subtitles already exist (no external subtitles found online)", lang_name));
                                         } else if embedded_phrases.iter().any(|phrase| combined_output.contains(phrase)) {
                                             let lang_code = langs_clone.get(0).cloned().unwrap_or_else(|| "unknown".to_string());
-                                            let lang_name = language_code_to_name(&lang_code).to_string();
+                                            let lang_name = SubtitleUtils::language_code_to_name(&lang_code).to_string();
                                             job.status = JobStatus::EmbeddedExists(format!("Embedded {} subtitles already exist (no external subtitles found online)", lang_name));
                                         } else {
                                             job.status = JobStatus::Failed("No subtitles found (no embedded or external subtitles available)".to_string());
@@ -1078,7 +1167,8 @@ impl SubtitleDownloader {
             info!("Download thread completed");
         }));
     }
-    /// Check if all downloads are complete and update progress.
+
+    /// Check if all downloads are complete and update progress
     fn check_download_completion(&mut self) {
         if !self.downloading {
             return;
@@ -1121,16 +1211,9 @@ impl SubtitleDownloader {
             }
         }
     }
-}
 
-// =========================
-// === eframe::App Implementation (GUI)
-// =========================
-impl eframe::App for SubtitleDownloader {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Check download completion
-        self.check_download_completion();
-
+    /// Handle Python and Subliminal installation states
+    fn handle_installation_states(&mut self) {
         if self.installing_python {
             if let Some(result) = self.python_install_result.lock().unwrap().take() {
                 self.installing_python = false;
@@ -1138,21 +1221,21 @@ impl eframe::App for SubtitleDownloader {
                     Ok(_) => {
                         info!("Python installation completed successfully");
                         // Refresh environment to pick up new Python installation
-                        if let Err(e) = refresh_environment() {
+                        if let Err(e) = PythonManager::refresh_environment() {
                             error!("Failed to refresh environment: {}", e);
                         }
-                        self.python_version = python_version();
+                        self.python_version = PythonManager::get_version();
                         self.python_installed = self.python_version.is_some();
                         self.status = "✅ Python installed successfully. Installing Subliminal...".to_string();
-                        self.subliminal_installed = check_subliminal_installed();
+                        self.subliminal_installed = PythonManager::is_subliminal_installed();
 
                         // Start installing subliminal automatically
                         self.installing_subliminal = true;
                         let result_ptr = self.subliminal_install_result.clone();
                         std::thread::spawn(move || {
-                            let success = install_subliminal();
+                            let success = PythonManager::install_subliminal();
                             let result = if success {
-                                match add_scripts_to_path() {
+                                match PythonManager::add_scripts_to_path() {
                                     Ok(_) => Ok(()),
                                     Err(e) => Err(format!("Subliminal installed, but failed to update PATH: {}", e)),
                                 }
@@ -1177,7 +1260,7 @@ impl eframe::App for SubtitleDownloader {
                     Ok(_) => {
                         info!("Subliminal installation completed successfully");
                         // Refresh environment to pick up new subliminal installation
-                        if let Err(e) = refresh_environment() {
+                        if let Err(e) = PythonManager::refresh_environment() {
                             error!("Failed to refresh environment: {}", e);
                         }
                         
@@ -1191,296 +1274,375 @@ impl eframe::App for SubtitleDownloader {
                 }
             }
         }
+    }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Heading with Dracula colors
-            ui.heading(egui::RichText::new("Rustitles - Subtitle Downloader Tool").color(egui::Color32::from_rgb(189, 147, 249)));
-            ui.add_space(5.0);
+    /// Render the application header
+    fn render_header(&self, ui: &mut egui::Ui) {
+        ui.heading(egui::RichText::new("Rustitles - Subtitle Downloader Tool").color(egui::Color32::from_rgb(189, 147, 249)));
+        ui.add_space(5.0);
+    }
 
-            if self.installing_python || self.installing_subliminal {
-                ui.label("⏳ Please wait...");
-                ui.label(&self.status);
-                return;
+    /// Render installation wait screen
+    fn render_installation_wait(&self, ui: &mut egui::Ui) {
+        ui.label("⏳ Please wait...");
+        ui.label(&self.status);
+    }
+
+    /// Render Python installation status
+    fn render_python_status(&mut self, ui: &mut egui::Ui) {
+        if self.python_installed {
+            ui.label(format!(
+                "✅ Python is installed: {}",
+                self.python_version.as_deref().unwrap_or("Unknown version")
+            ));
+        } else {
+            ui.label("❌ Python not found");
+            if ui.button("Install Python").clicked() {
+                info!("User initiated Python installation");
+                self.status = "Installing Python 3.13.5... (Please check your taskbar for a UAC prompt and accept)".to_string();
+                self.installing_python = true;
+                let result_ptr = self.python_install_result.clone();
+
+                thread::spawn(move || {
+                    let result = (|| {
+                        let path = PythonManager::download_installer().map_err(|e| e.to_string())?;
+                        let ok = PythonManager::install_silent(&path).map_err(|e| e.to_string())?;
+                        if ok { Ok(()) } else { Err("Installer exited with failure".to_string()) }
+                    })();
+
+                    *result_ptr.lock().unwrap() = Some(result);
+                });
             }
+        }
+    }
 
-            if self.python_installed {
-                ui.label(format!(
-                    "✅ Python is installed: {}",
-                    self.python_version.as_deref().unwrap_or("Unknown version")
-                ));
+    /// Render Subliminal installation status
+    fn render_subliminal_status(&mut self, ui: &mut egui::Ui) {
+        if self.python_installed {
+            if self.subliminal_installed {
+                ui.label("✅ Subliminal is installed");
             } else {
-                ui.label("❌ Python not found");
-                if ui.button("Install Python").clicked() {
-                    info!("User initiated Python installation");
-                    self.status = "Installing Python 3.13.5... (Please check your taskbar for a UAC prompt and accept)".to_string();
-                    self.installing_python = true;
-                    let result_ptr = self.python_install_result.clone();
+                ui.label("❌ Subliminal not found");
+                if ui.button("Install Subliminal").clicked() {
+                    info!("User initiated Subliminal installation");
+                    self.status = "Installing Subliminal...".to_string();
+                    self.installing_subliminal = true;
+                    let result_ptr = self.subliminal_install_result.clone();
 
                     thread::spawn(move || {
-                        let result = (|| {
-                            let path = download_python_installer().map_err(|e| e.to_string())?;
-                            let ok = install_python_silent(&path).map_err(|e| e.to_string())?;
-                            if ok { Ok(()) } else { Err("Installer exited with failure".to_string()) }
-                        })();
-
+                        let success = PythonManager::install_subliminal();
+                        let result = if success {
+                            match PythonManager::add_scripts_to_path() {
+                                Ok(_) => Ok(()),
+                                Err(e) => Err(format!("Subliminal installed, but failed to update PATH: {}", e)),
+                            }
+                        } else {
+                            Err("pip install failed".to_string())
+                        };
                         *result_ptr.lock().unwrap() = Some(result);
                     });
                 }
             }
+        }
+    }
 
-            if self.python_installed {
-                if self.subliminal_installed {
-                    ui.label("✅ Subliminal is installed");
-                } else {
-                    ui.label("❌ Subliminal not found");
-                    if ui.button("Install Subliminal").clicked() {
-                        info!("User initiated Subliminal installation");
-                        self.status = "Installing Subliminal...".to_string();
-                        self.installing_subliminal = true;
-                        let result_ptr = self.subliminal_install_result.clone();
+    /// Render language selection interface
+    fn render_language_selection(&mut self, ui: &mut egui::Ui) {
+        let language_list = vec![
+            ("en", "English"), ("fr", "French"), ("es", "Spanish"), ("de", "German"),
+            ("it", "Italian"), ("pt", "Portuguese"), ("nl", "Dutch"), ("pl", "Polish"),
+            ("ru", "Russian"), ("sv", "Swedish"), ("fi", "Finnish"), ("da", "Danish"),
+            ("no", "Norwegian"), ("cs", "Czech"), ("hu", "Hungarian"), ("ro", "Romanian"),
+            ("he", "Hebrew"), ("ar", "Arabic"), ("ja", "Japanese"), ("ko", "Korean"),
+            ("zh", "Chinese"), ("zh-cn", "Chinese (Simplified)"), ("zh-tw", "Chinese (Traditional)")
+        ];
 
-                        thread::spawn(move || {
-                            let success = install_subliminal();
-                            let result = if success {
-                                match add_scripts_to_path() {
-                                    Ok(_) => Ok(()),
-                                    Err(e) => Err(format!("Subliminal installed, but failed to update PATH: {}", e)),
+        ui.horizontal(|ui| {
+            // Button that looks like ComboBox (no dropdown arrow)
+            let selected_text = if self.selected_languages.is_empty() {
+                "Select Languages".to_string()
+            } else {
+                self.selected_languages.join(", ")
+            };
+            
+            let button_response = ui.add_sized([130.0, ui.spacing().interact_size.y], egui::Button::new(selected_text));
+            if button_response.clicked() {
+                debug!("Button clicked! Current state: {}", self.keep_dropdown_open);
+                self.keep_dropdown_open = !self.keep_dropdown_open;
+                debug!("New state: {}", self.keep_dropdown_open);
+            }
+
+            let force_checkbox_response = ui.checkbox(&mut self.force_download, "Ignore Embedded Subtitles");
+            if force_checkbox_response.changed() {
+                info!("(Ignore Embedded Subtitles) changed to: {}", self.force_download);
+                self.keep_dropdown_open = false; // Close dropdown when checkbox is clicked
+                self.save_current_settings(); // Save settings when changed
+            }
+            ui.add_space(0.0);
+            let overwrite_checkbox_response = ui.checkbox(&mut self.overwrite_existing, "Overwrite Existing Subtitles");
+            if overwrite_checkbox_response.changed() {
+                info!("(Overwrite Existing Subtitles) changed to: {}", self.overwrite_existing);
+                self.keep_dropdown_open = false; // Close dropdown when checkbox is clicked
+                self.save_current_settings(); // Save settings when changed
+                // Re-scan for missing subtitles when overwrite option changes
+                if !self.folder_path.is_empty() {
+                    self.scan_folder();
+                }
+            }
+        });
+        
+        // Simple popup that shows when button is clicked
+        if self.keep_dropdown_open {
+            ui.add_space(5.0);
+            ui.group(|ui| {
+                ui.set_width(200.0);
+                
+                egui::ScrollArea::vertical()
+                    .max_height(200.0)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width()); // Make scrollbar flush right
+                        for (code, name) in &language_list {
+                            let mut selected = self.selected_languages.contains(&code.to_string());
+                            if ui.checkbox(&mut selected, *name).changed() {
+                                if selected {
+                                    self.selected_languages.push(code.to_string());
+                                    debug!("Language selected: {}", code);
+                                } else {
+                                    self.selected_languages.retain(|c| c != code);
+                                    debug!("Language deselected: {}", code);
                                 }
-                            } else {
-                                Err("pip install failed".to_string())
-                            };
-                            *result_ptr.lock().unwrap() = Some(result);
-                        });
+                                
+                                self.save_current_settings(); // Save settings when languages change
+                                
+                                // Re-scan for missing subtitles when languages change
+                                if !self.folder_path.is_empty() {
+                                    info!("Languages changed to {:?}, re-scanning folder", self.selected_languages);
+                                    self.scan_folder();
+                                }
+                            }
+                        }
+                    });
+            });
+        }
+    }
+
+    /// Render concurrent downloads setting
+    fn render_concurrent_downloads(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Concurrent Downloads:");
+            let mut concurrent_text = self.concurrent_downloads.to_string();
+            let text_response = ui.add_sized([25.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(&mut concurrent_text));
+            if text_response.changed() {
+                if let Ok(value) = concurrent_text.parse::<usize>() {
+                    if Validation::is_valid_concurrent_downloads(value) {
+                        let old_value = self.concurrent_downloads;
+                        self.concurrent_downloads = value;
+                        debug!("Concurrent downloads changed from {} to {}", old_value, self.concurrent_downloads);
+                        self.save_current_settings(); // Save settings when changed
+                    } else {
+                        warn!("Invalid concurrent downloads value: {}", value);
+                    }
+                }
+                self.keep_dropdown_open = false; // Close dropdown when text field is changed
+            }
+            if text_response.gained_focus() {
+                self.keep_dropdown_open = false; // Close dropdown when text field gains focus
+            }
+        });
+    }
+
+    /// Render folder selection interface
+    fn render_folder_selection(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label("Folder to scan:");
+            let folder_button_response = ui.button("Select Folder");
+            if folder_button_response.clicked() {
+                self.keep_dropdown_open = false; // Close dropdown when folder button is clicked
+                if let Some(folder) = FileDialog::new().pick_folder() {
+                    let new_folder = folder.display().to_string();
+                    if self.folder_path != new_folder && Validation::is_valid_folder(&new_folder) {
+                        info!("Folder selected: {}", new_folder);
+                        self.folder_path = new_folder;
+                        self.scan_folder();
+                    } else if !Validation::is_valid_folder(&new_folder) {
+                        warn!("Invalid folder selected: {}", new_folder);
                     }
                 }
             }
+            ui.label(&self.folder_path);
+        });
+    }
 
+    /// Render scan results summary
+    fn render_scan_results(&self, ui: &mut egui::Ui) {
+        if !self.folder_path.is_empty() {
+            let scanned_count = self.scanned_videos.lock().unwrap().len();
+            let missing_count = self.videos_missing_subs.lock().unwrap().len();
+            ui.label(format!("Found videos: {}", scanned_count));
+            if self.overwrite_existing {
+                ui.label(format!("Overwriting {} Subtitles", missing_count));
+            } else {
+                ui.label(format!("Videos missing subtitles: {}", missing_count));
+            }
+        }
+    }
+
+    /// Render download jobs status
+    fn render_download_jobs(&self, ui: &mut egui::Ui) {
+        let jobs = self.download_jobs.lock().unwrap();
+        if !jobs.is_empty() {
+            ui.label("Subtitle Jobs:");
+            ui.separator();
+            
+            // Calculate available height for the scroll area
+            // Reserve space for: status label, progress label, progress bar, and some padding
+            let reserved_height = 80.0; // Approximate space needed for bottom elements
+            let available_height = ui.available_height() - reserved_height;
+            let scroll_height = available_height.max(200.0); // Minimum height of 200px (previous default)
+            
+            egui::ScrollArea::vertical()
+                .max_height(scroll_height)
+                .show(ui, |ui| {
+                    // Set a fixed width to ensure consistent scroll bar positioning
+                    let available_width = ui.available_width();
+                    ui.set_width(available_width - 20.0); // Reserve space for scroll bar
+                    
+                    for job in jobs.iter() {
+                        let (status_text, status_color) = match &job.status {
+                            JobStatus::Pending => ("Pending".to_string(), Some(egui::Color32::from_rgb(241, 250, 140))), // yellow
+                            JobStatus::Running => ("Running".to_string(), Some(egui::Color32::from_rgb(189, 147, 249))), // lighter purple
+                            JobStatus::Success => ("Success".to_string(), Some(egui::Color32::from_rgb(80, 250, 123))), // green
+                            JobStatus::EmbeddedExists(msg) => (msg.clone(), Some(egui::Color32::from_rgb(255, 184, 108))), // orange
+                            JobStatus::Failed(err) => (format!("Failed: {}", err), Some(egui::Color32::from_rgb(255, 85, 85))), // red
+                        };
+                        // Video name and status on first line
+                        ui.horizontal(|ui| {
+                            let file_name = Utils::get_file_name(&job.video_path);
+                            ui.label(Utils::truncate_string(&file_name, 50));
+                            match status_color {
+                                Some(color) => ui.label(egui::RichText::new(format!(" - {}", status_text)).color(color)),
+                                None => ui.label(format!(" - {}", status_text)),
+                            };
+                        });
+                        
+                        // Subtitle path on second line (indented)
+                        for sub_path in &job.subtitle_paths {
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0); // Indent the subtitle path
+                                let path_str = sub_path.display().to_string();
+                                let hyperlink_resp = ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(format!("📄 {}", path_str))
+                                            .color(egui::Color32::from_rgb(248, 248, 242)) // white
+                                    )
+                                    .sense(egui::Sense::click())
+                                );
+                                if hyperlink_resp.hovered() {
+                                    let rect = hyperlink_resp.rect;
+                                    let painter = ui.painter();
+                                    painter.line_segment([
+                                        rect.left_bottom() + egui::vec2(2.0, -2.0),
+                                        rect.right_bottom() + egui::vec2(-2.0, -2.0)
+                                    ],
+                                    egui::Stroke::new(1.5, egui::Color32::from_rgb(139, 233, 253)) // cyan underline
+                                    );
+                                    ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
+                                }
+                                if hyperlink_resp.clicked() {
+                                    debug!("User clicked subtitle path: {}", path_str);
+                                    // Open the folder containing the subtitle file
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        let _ = std::process::Command::new("explorer")
+                                            .arg("/select,")
+                                            .arg(sub_path)
+                                            .spawn();
+                                    }
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        let _ = std::process::Command::new("xdg-open")
+                                            .arg(sub_path.parent().unwrap_or_else(|| std::path::Path::new(".")))
+                                            .spawn();
+                                    }
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        let _ = std::process::Command::new("open")
+                                            .arg("-R")
+                                            .arg(sub_path)
+                                            .spawn();
+                                    }
+                                }
+                            });
+                        }
+                    }
+                });
+        }
+    }
+
+    /// Render progress bar
+    fn render_progress_bar(&self, ui: &mut egui::Ui) {
+        // Show progress bar only when downloads are active or complete
+        if self.is_downloading || (!self.downloading && self.total_downloads > 0) {
+            if self.total_downloads > 0 {
+                ui.add_space(10.0);
+                let progress_text = format!("Progress: {} / {} ({})", 
+                    self.downloads_completed, 
+                    self.total_downloads,
+                    Utils::format_progress(self.downloads_completed, self.total_downloads)
+                );
+                ui.label(progress_text);
+            }
+        }
+        // Place the progress bar here, outside the ScrollArea. always fit the window
+        if (self.is_downloading || (!self.downloading && self.total_downloads > 0)) && self.total_downloads > 0 {
+            let progress = self.downloads_completed as f32 / self.total_downloads as f32;
+            let window_width = ui.ctx().screen_rect().width();
+            let progress_bar = egui::ProgressBar::new(progress)
+                .show_percentage()
+                .fill(egui::Color32::from_rgb(124, 99, 160)) // #7c63a0
+                .desired_width(window_width - 18.0);
+            ui.add(progress_bar);
+        }
+    }
+}
+
+// =============================================================================
+// GUI IMPLEMENTATION
+// =============================================================================
+
+impl eframe::App for SubtitleDownloader {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Check download completion
+        self.check_download_completion();
+
+        // Handle installation states
+        self.handle_installation_states();
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            self.render_header(ui);
+            
+            if self.installing_python || self.installing_subliminal {
+                self.render_installation_wait(ui);
+                return;
+            }
+
+            self.render_python_status(ui);
+            self.render_subliminal_status(ui);
             ui.separator();
 
             // Only show language selection and folder selection after subliminal is installed
             if self.subliminal_installed {
-                let language_list = vec![
-                    ("en", "English"), ("fr", "French"), ("es", "Spanish"), ("de", "German"),
-                    ("it", "Italian"), ("pt", "Portuguese"), ("nl", "Dutch"), ("pl", "Polish"),
-                    ("ru", "Russian"), ("sv", "Swedish"), ("fi", "Finnish"), ("da", "Danish"),
-                    ("no", "Norwegian"), ("cs", "Czech"), ("hu", "Hungarian"), ("ro", "Romanian"),
-                    ("he", "Hebrew"), ("ar", "Arabic"), ("ja", "Japanese"), ("ko", "Korean"),
-                    ("zh", "Chinese"), ("zh-cn", "Chinese (Simplified)"), ("zh-tw", "Chinese (Traditional)")
-                ];
-
-                ui.horizontal(|ui| {
-                    // Button that looks like ComboBox (no dropdown arrow)
-                    let selected_text = if self.selected_languages.is_empty() {
-                        "Select Languages".to_string()
-                    } else {
-                        self.selected_languages.join(", ")
-                    };
-                    
-                    let button_response = ui.add_sized([130.0, ui.spacing().interact_size.y], egui::Button::new(selected_text));
-                    if button_response.clicked() {
-                        debug!("Button clicked! Current state: {}", self.keep_dropdown_open);
-                        self.keep_dropdown_open = !self.keep_dropdown_open;
-                        debug!("New state: {}", self.keep_dropdown_open);
-                    }
-
-                    let force_checkbox_response = ui.checkbox(&mut self.force_download, "Ignore Embedded Subtitles");
-                    if force_checkbox_response.changed() {
-                        info!("(Ignore Embedded Subtitles) changed to: {}", self.force_download);
-                        self.keep_dropdown_open = false; // Close dropdown when checkbox is clicked
-                        self.save_current_settings(); // Save settings when changed
-                    }
-                    ui.add_space(0.0);
-                    let overwrite_checkbox_response = ui.checkbox(&mut self.overwrite_existing, "Overwrite Existing Subtitles");
-                    if overwrite_checkbox_response.changed() {
-                        info!("(Overwrite Existing Subtitles) changed to: {}", self.overwrite_existing);
-                        self.keep_dropdown_open = false; // Close dropdown when checkbox is clicked
-                        self.save_current_settings(); // Save settings when changed
-                        // Re-scan for missing subtitles when overwrite option changes
-                        if !self.folder_path.is_empty() {
-                            self.scan_folder();
-                        }
-                    }
-                });
-                
-                // Simple popup that shows when button is clicked
-                if self.keep_dropdown_open {
-                    ui.add_space(5.0);
-                    ui.group(|ui| {
-                        ui.set_width(200.0);
-                        
-                        egui::ScrollArea::vertical()
-                            .max_height(200.0)
-                            .show(ui, |ui| {
-                                ui.set_width(ui.available_width()); // Make scrollbar flush right
-                                for (code, name) in &language_list {
-                                    let mut selected = self.selected_languages.contains(&code.to_string());
-                                    if ui.checkbox(&mut selected, *name).changed() {
-                                        if selected {
-                                            self.selected_languages.push(code.to_string());
-                                            debug!("Language selected: {}", code);
-                                        } else {
-                                            self.selected_languages.retain(|c| c != code);
-                                            debug!("Language deselected: {}", code);
-                                        }
-                                        
-                                        self.save_current_settings(); // Save settings when languages change
-                                        
-                                        // Re-scan for missing subtitles when languages change
-                                        if !self.folder_path.is_empty() {
-                                            info!("Languages changed to {:?}, re-scanning folder", self.selected_languages);
-                                            self.scan_folder();
-                                        }
-                                    }
-                                }
-                            });
-                    });
-                }
+                self.render_language_selection(ui);
+                ui.separator();
+                self.render_concurrent_downloads(ui);
+                ui.separator();
+                self.render_folder_selection(ui);
+                ui.separator();
+                self.render_scan_results(ui);
+                self.render_download_jobs(ui);
             } else {
                 // Show message when subliminal is not installed
                 ui.label("Please install Python and Subliminal above to start downloading subtitles.");
-            }
-
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                ui.label("Concurrent Downloads:");
-                let mut concurrent_text = self.concurrent_downloads.to_string();
-                let text_response = ui.add_sized([25.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(&mut concurrent_text));
-                if text_response.changed() {
-                    if let Ok(value) = concurrent_text.parse::<usize>() {
-                        if value > 0 {
-                            let old_value = self.concurrent_downloads;
-                            self.concurrent_downloads = value.min(100);
-                            debug!("Concurrent downloads changed from {} to {}", old_value, self.concurrent_downloads);
-                            self.save_current_settings(); // Save settings when changed
-                        }
-                    }
-                    self.keep_dropdown_open = false; // Close dropdown when text field is changed
-                }
-                if text_response.gained_focus() {
-                    self.keep_dropdown_open = false; // Close dropdown when text field gains focus
-                }
-            });
-
-            ui.separator();
-
-            ui.horizontal(|ui| {
-                ui.label("Folder to scan:");
-                let folder_button_response = ui.button("Select Folder");
-                if folder_button_response.clicked() {
-                    self.keep_dropdown_open = false; // Close dropdown when folder button is clicked
-                    if let Some(folder) = FileDialog::new().pick_folder() {
-                        let new_folder = folder.display().to_string();
-                        if self.folder_path != new_folder {
-                            info!("Folder selected: {}", new_folder);
-                            self.folder_path = new_folder;
-                            self.scan_folder();
-                        }
-                    }
-                }
-                ui.label(&self.folder_path);
-            });
-
-            ui.separator();
-
-            if !self.folder_path.is_empty() {
-                let scanned_count = self.scanned_videos.lock().unwrap().len();
-                let missing_count = self.videos_missing_subs.lock().unwrap().len();
-                ui.label(format!("Found videos: {}", scanned_count));
-                if self.overwrite_existing {
-                    ui.label(format!("Overwriting {} Subtitles", missing_count));
-                } else {
-                    ui.label(format!("Videos missing subtitles: {}", missing_count));
-                }
-            }
-
-            // Show download jobs status
-            let jobs = self.download_jobs.lock().unwrap();
-            if !jobs.is_empty() {
-                ui.label("Subtitle Jobs:");
-                ui.separator();
-                
-                // Calculate available height for the scroll area
-                // Reserve space for: status label, progress label, progress bar, and some padding
-                let reserved_height = 80.0; // Approximate space needed for bottom elements
-                let available_height = ui.available_height() - reserved_height;
-                let scroll_height = available_height.max(200.0); // Minimum height of 200px (previous default)
-                
-                egui::ScrollArea::vertical()
-                    .max_height(scroll_height)
-                    .show(ui, |ui| {
-                        // Set a fixed width to ensure consistent scroll bar positioning
-                        let available_width = ui.available_width();
-                        ui.set_width(available_width - 20.0); // Reserve space for scroll bar
-                        
-                        for job in jobs.iter() {
-                            let (status_text, status_color) = match &job.status {
-                                JobStatus::Pending => ("Pending".to_string(), Some(egui::Color32::from_rgb(241, 250, 140))), // yellow
-                                JobStatus::Running => ("Running".to_string(), Some(egui::Color32::from_rgb(189, 147, 249))), // lighter purple
-                                JobStatus::Success => ("Success".to_string(), Some(egui::Color32::from_rgb(80, 250, 123))), // green
-                                JobStatus::EmbeddedExists(msg) => (msg.clone(), Some(egui::Color32::from_rgb(255, 184, 108))), // orange
-                                JobStatus::Failed(err) => (format!("Failed: {}", err), Some(egui::Color32::from_rgb(255, 85, 85))), // red
-                            };
-                            // Video name and status on first line
-                            ui.horizontal(|ui| {
-                                ui.label(job.video_path.file_name().unwrap_or_default().to_string_lossy());
-                                match status_color {
-                                    Some(color) => ui.label(egui::RichText::new(format!(" - {}", status_text)).color(color)),
-                                    None => ui.label(format!(" - {}", status_text)),
-                                };
-                            });
-                            
-                            // Subtitle path on second line (indented)
-                            for sub_path in &job.subtitle_paths {
-                                ui.horizontal(|ui| {
-                                    ui.add_space(20.0); // Indent the subtitle path
-                                    let path_str = sub_path.display().to_string();
-                                    let hyperlink_resp = ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(format!("📄 {}", path_str))
-                                                .color(egui::Color32::from_rgb(248, 248, 242)) // white
-                                        )
-                                        .sense(egui::Sense::click())
-                                    );
-                                    if hyperlink_resp.hovered() {
-                                        let rect = hyperlink_resp.rect;
-                                        let painter = ui.painter();
-                                        painter.line_segment([
-                                            rect.left_bottom() + egui::vec2(2.0, -2.0),
-                                            rect.right_bottom() + egui::vec2(-2.0, -2.0)
-                                        ],
-                                        egui::Stroke::new(1.5, egui::Color32::from_rgb(139, 233, 253)) // cyan underline
-                                        );
-                                        ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
-                                    }
-                                    if hyperlink_resp.clicked() {
-                                        debug!("User clicked subtitle path: {}", path_str);
-                                        // Open the folder containing the subtitle file
-                                        #[cfg(target_os = "windows")]
-                                        {
-                                            let _ = std::process::Command::new("explorer")
-                                                .arg("/select,")
-                                                .arg(sub_path)
-                                                .spawn();
-                                        }
-                                        #[cfg(target_os = "linux")]
-                                        {
-                                            let _ = std::process::Command::new("xdg-open")
-                                                .arg(sub_path.parent().unwrap_or_else(|| std::path::Path::new(".")))
-                                                .spawn();
-                                        }
-                                        #[cfg(target_os = "macos")]
-                                        {
-                                            let _ = std::process::Command::new("open")
-                                                .arg("-R")
-                                                .arg(sub_path)
-                                                .spawn();
-                                        }
-                                    }
-                                });
-                            }
-                        }
-                    });
             }
 
             if !self.folder_path.is_empty() {
@@ -1488,24 +1650,7 @@ impl eframe::App for SubtitleDownloader {
             }
 
             ui.label(&self.status);
-
-            // Show progress bar only when downloads are active or complete
-            if self.is_downloading || (!self.downloading && self.total_downloads > 0) {
-                if self.total_downloads > 0 {
-                    ui.add_space(10.0);
-                    ui.label(format!("Progress: {} / {}", self.downloads_completed, self.total_downloads));
-                }
-            }
-            // Place the progress bar here, outside the ScrollArea. always fit the window
-            if (self.is_downloading || (!self.downloading && self.total_downloads > 0)) && self.total_downloads > 0 {
-                let progress = self.downloads_completed as f32 / self.total_downloads as f32;
-                let window_width = ui.ctx().screen_rect().width();
-                let progress_bar = egui::ProgressBar::new(progress)
-                    .show_percentage()
-                    .fill(egui::Color32::from_rgb(124, 99, 160)) // #7c63a0
-                    .desired_width(window_width - 18.0);
-                ui.add(progress_bar);
-            }
+            self.render_progress_bar(ui);
         });
 
         // When scan finishes, start downloads automatically
@@ -1525,6 +1670,7 @@ impl eframe::App for SubtitleDownloader {
 
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
     }
+
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         info!("Application closed by user");
         info!("");
@@ -1533,19 +1679,24 @@ impl eframe::App for SubtitleDownloader {
     }
 }
 
-// =========================
-// === Main Entry Point
-// =========================
-fn main() {
+// =============================================================================
+// MAIN ENTRY POINT
+// =============================================================================
+
+/// Initialize the application with proper logging and configuration
+fn initialize_app() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logging
     if let Err(e) = setup_logging() {
         eprintln!("Failed to initialize logging: {}", e);
     }
     
     info!("Starting Rustitles application");
-    
-    // Load icon from embedded ICO file
-    let icon_data = if let Ok(image) = image::load_from_memory(include_bytes!("../resources/rustitles_icon.ico")) {
+    Ok(())
+}
+
+/// Load application icon from embedded resources
+fn load_app_icon() -> Option<egui::IconData> {
+    if let Ok(image) = image::load_from_memory(include_bytes!("../resources/rustitles_icon.ico")) {
         let rgba = image.to_rgba8();
         let size = [rgba.width() as u32, rgba.height() as u32];
         Some(egui::IconData {
@@ -1556,12 +1707,12 @@ fn main() {
     } else {
         warn!("Failed to load application icon");
         None
-    };
+    }
+}
 
-    let window_size = [800.0, 530.0];
-
-    // Use Windows API to get the monitor under the cursor and center the window there
-    let center_pos = unsafe {
+/// Calculate window position to center on the monitor under the cursor
+fn calculate_window_position(window_size: [f32; 2]) -> egui::Pos2 {
+    unsafe {
         let mut point = POINT { x: 0, y: 0 };
         if GetCursorPos(&mut point).is_ok() {
             let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
@@ -1583,61 +1734,238 @@ fn main() {
         } else {
             egui::Pos2::new(100.0, 100.0)
         }
-    };
+    }
+}
+
+/// Configure the application window and visuals
+fn configure_window(icon_data: Option<egui::IconData>) -> eframe::NativeOptions {
+    let window_size = WINDOW_SIZE;
+    let center_pos = calculate_window_position(window_size);
 
     let mut viewport_builder = egui::ViewportBuilder::default()
         .with_inner_size(window_size)
         .with_position(center_pos)
         .with_decorations(true)
         .with_resizable(true)
-        .with_min_inner_size([600.0, 461.0]); // Minimum window size to prevent UI elements from disappearing
+        .with_min_inner_size(MIN_WINDOW_SIZE); // Minimum window size to prevent UI elements from disappearing
     
     if let Some(icon) = icon_data {
         viewport_builder = viewport_builder.with_icon(icon);
     }
 
-    let native_options = eframe::NativeOptions {
+    eframe::NativeOptions {
         viewport: viewport_builder,
         ..Default::default()
-    };
+    }
+}
+
+/// Configure the application visuals with Dracula theme
+fn configure_visuals(ctx: &egui::Context) {
+    let mut visuals = egui::Visuals::dark();
     
-    info!("Initializing GUI with window size: {}x{}", window_size[0], window_size[1]);
+    // Make text lighter for better readability
+    visuals.override_text_color = Some(egui::Color32::from_rgb(248, 248, 242)); // #f8f8f2 (light gray)
     
-    let result = eframe::run_native(
-        "Rustitles",
-        native_options,
-        Box::new(|cc| {
-            // Set dark mode
-            let mut visuals = egui::Visuals::dark();
-            
-            // Make text lighter for better readability
-            visuals.override_text_color = Some(egui::Color32::from_rgb(248, 248, 242)); // #f8f8f2 (light gray)
-            
-            // Dracula theme accent colors
-            visuals.widgets.active.bg_fill = egui::Color32::from_rgb(189, 147, 249); // #bd93f9 (purple)
-            visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(139, 233, 253); // #8be9fd (cyan)
-            visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(68, 71, 90); // #44475a (darker gray)
-            visuals.selection.bg_fill = egui::Color32::from_rgb(189, 147, 249); // #bd93f9 (purple)
-            visuals.hyperlink_color = egui::Color32::from_rgb(139, 233, 253); // #8be9fd (cyan)
-            visuals.warn_fg_color = egui::Color32::from_rgb(255, 184, 108); // #ffb86c (orange)
-            visuals.error_fg_color = egui::Color32::from_rgb(255, 85, 85); // #ff5555 (red)
-            visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(68, 71, 90); // #44475a
-            visuals.widgets.active.fg_stroke.color = egui::Color32::from_rgb(248, 248, 242); // #f8f8f2 (white text on purple)
-            visuals.widgets.hovered.fg_stroke.color = egui::Color32::from_rgb(40, 42, 54); // #282a36 (dark text on cyan)
-            
-            cc.egui_ctx.set_visuals(visuals);
-            
-            info!("GUI initialized successfully");
-            Box::new(SubtitleDownloader::default())
-        }),
-    );
+    // Dracula theme accent colors
+    visuals.widgets.active.bg_fill = egui::Color32::from_rgb(189, 147, 249); // #bd93f9 (purple)
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(139, 233, 253); // #8be9fd (cyan)
+    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(68, 71, 90); // #44475a (darker gray)
+    visuals.selection.bg_fill = egui::Color32::from_rgb(189, 147, 249); // #bd93f9 (purple)
+    visuals.hyperlink_color = egui::Color32::from_rgb(139, 233, 253); // #8be9fd (cyan)
+    visuals.warn_fg_color = egui::Color32::from_rgb(255, 184, 108); // #ffb86c (orange)
+    visuals.error_fg_color = egui::Color32::from_rgb(255, 85, 85); // #ff5555 (red)
+    visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(68, 71, 90); // #44475a
+    visuals.widgets.active.fg_stroke.color = egui::Color32::from_rgb(248, 248, 242); // #f8f8f2 (white text on purple)
+    visuals.widgets.hovered.fg_stroke.color = egui::Color32::from_rgb(40, 42, 54); // #282a36 (dark text on cyan)
     
+    ctx.set_visuals(visuals);
+}
+
+/// Cleanup resources when the application exits
+fn cleanup_on_exit() {
     // Shutdown logger when app exits
     if let Ok(mut guard) = LOGGER.lock() {
         if let Some(logger) = guard.take() {
             logger.shutdown();
         }
     }
+}
+
+// =============================================================================
+// ERROR HANDLING
+// =============================================================================
+
+/// Custom error type for application-specific errors
+#[derive(Debug, thiserror::Error)]
+enum AppError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    
+    #[error("JSON serialization error: {0}")]
+    Json(#[from] serde_json::Error),
+    
+    #[error("Network error: {0}")]
+    Network(#[from] reqwest::Error),
+    
+
+}
+
+
+
+fn main() {
+    // Initialize the application
+    if let Err(e) = initialize_app() {
+        eprintln!("Failed to initialize application: {}", e);
+        return;
+    }
+    
+    // Load application icon
+    let icon_data = load_app_icon();
+    
+    // Configure window
+    let native_options = configure_window(icon_data);
+    
+    info!("Initializing GUI with window size: {}x{}", WINDOW_SIZE[0], WINDOW_SIZE[1]);
+    
+    // Run the application
+    let result = eframe::run_native(
+        "Rustitles",
+        native_options,
+        Box::new(|cc| {
+            // Configure visuals
+            configure_visuals(&cc.egui_ctx);
+            
+            info!("GUI initialized successfully");
+            Box::new(SubtitleDownloader::default())
+        }),
+    );
+    
+    // Cleanup on exit
+    cleanup_on_exit();
     
     result.expect("Failed to start eframe");
+}
+
+// =============================================================================
+// UTILITIES
+// =============================================================================
+
+/// Common utility functions used throughout the application
+struct Utils;
+
+impl Utils {
+    /// Safely get the file name from a path, returning a default if not available
+    fn get_file_name(path: &Path) -> String {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Unknown")
+            .to_string()
+    }
+
+    /// Format a duration in a human-readable format
+    fn format_duration(duration: std::time::Duration) -> String {
+        let seconds = duration.as_secs();
+        if seconds < 60 {
+            format!("{}s", seconds)
+        } else if seconds < 3600 {
+            format!("{}m {}s", seconds / 60, seconds % 60)
+        } else {
+            let hours = seconds / 3600;
+            let minutes = (seconds % 3600) / 60;
+            format!("{}h {}m", hours, minutes)
+        }
+    }
+
+    /// Truncate a string to a maximum length, adding ellipsis if needed
+    fn truncate_string(s: &str, max_len: usize) -> String {
+        if s.len() <= max_len {
+            s.to_string()
+        } else {
+            format!("{}...", &s[..max_len - 3])
+        }
+    }
+
+    /// Check if a path is a video file based on its extension
+    fn is_video_file(path: &Path) -> bool {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| VIDEO_EXTENSIONS.iter().any(|&v| v.eq_ignore_ascii_case(ext)))
+            .unwrap_or(false)
+    }
+
+    /// Check if a path is a subtitle file based on its extension
+    fn is_subtitle_file(path: &Path) -> bool {
+        let subtitle_extensions = ["srt", "sub", "ssa", "ass", "vtt"];
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| subtitle_extensions.iter().any(|&v| v.eq_ignore_ascii_case(ext)))
+            .unwrap_or(false)
+    }
+
+    /// Create a progress percentage string
+    fn format_progress(current: usize, total: usize) -> String {
+        if total == 0 {
+            "0%".to_string()
+        } else {
+            let percentage = (current as f32 / total as f32 * 100.0) as usize;
+            format!("{}%", percentage)
+        }
+    }
+
+    /// Get the current timestamp for logging
+    fn get_timestamp() -> String {
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+}
+
+// =============================================================================
+// VALIDATION
+// =============================================================================
+
+/// Input validation utilities
+struct Validation;
+
+impl Validation {
+    /// Validate that a folder path exists and is a directory
+    fn is_valid_folder(path: &str) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        
+        let path = Path::new(path);
+        path.exists() && path.is_dir()
+    }
+
+    /// Validate that a file path exists and is a file
+    fn is_valid_file(path: &str) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        
+        let path = Path::new(path);
+        path.exists() && path.is_file()
+    }
+
+    /// Validate concurrent downloads setting
+    fn is_valid_concurrent_downloads(value: usize) -> bool {
+        value > 0 && value <= MAX_CONCURRENT_DOWNLOADS
+    }
+
+    /// Validate language code format
+    fn is_valid_language_code(code: &str) -> bool {
+        !code.is_empty() && code.len() <= 10 && code.chars().all(|c| c.is_ascii_alphabetic() || c == '-')
+    }
+
+    /// Validate that at least one language is selected
+    fn has_selected_languages(languages: &[String]) -> bool {
+        !languages.is_empty() && languages.iter().all(|lang| Self::is_valid_language_code(lang))
+    }
+
+    /// Sanitize a file path for display
+    fn sanitize_path_for_display(path: &str) -> String {
+        path.replace('\\', "/")
+            .chars()
+            .filter(|&c| c.is_ascii_graphic() || c.is_ascii_whitespace())
+            .collect()
+    }
 }
