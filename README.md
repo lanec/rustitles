@@ -37,11 +37,13 @@ This tool is here for the "me" of yesterday (you) who was trying to find a tool 
 - [Microsoft Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)
 - [Python](https://www.python.org/downloads/)
 - [Subliminal](https://github.com/Diaoul/subliminal)
+- [FFmpeg](https://ffmpeg.org/about.html)
 
 ### Linux
-- Python 3 and pip
-- Subliminal
-- FFmpeg
+- [Python](https://www.python.org/downloads/)
+- [Pipx](https://github.com/pypa/pipx)
+- [Subliminal](https://github.com/Diaoul/subliminal)
+- [FFmpeg](https://ffmpeg.org/about.html)
 
 Rustitles will automatically install Python & Subliminal, but if you'd prefer to do that manually:
 
