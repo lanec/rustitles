@@ -1860,7 +1860,7 @@ impl SubtitleDownloader {
                     let exe_url = if cfg!(target_os = "windows") {
                         format!("https://github.com/fosterbarnes/rustitles/releases/download/{}/rustitles.exe", latest)
                     } else if cfg!(target_os = "linux") {
-                        format!("https://github.com/fosterbarnes/rustitles/releases/download/{}/rustitles_linux", latest)
+                        format!("https://github.com/fosterbarnes/rustitles/releases/download/{}/rustitles.AppImage", latest)
                     } else {
                         format!("https://github.com/fosterbarnes/rustitles/releases/download/{}/rustitles", latest)
                     };
