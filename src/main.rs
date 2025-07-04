@@ -74,7 +74,7 @@ use xdg;
 // =============================================================================
 
 /// The current application version (keep in sync with Cargo.toml)
-const APP_VERSION: &str = "2.0.0";
+const APP_VERSION: &str = "2.0.1";
 
 /// Supported video file extensions for subtitle scanning
 static VIDEO_EXTENSIONS: &[&str] = &[
@@ -2086,7 +2086,47 @@ impl SubtitleDownloader {
                         ui.horizontal(|ui| {
                             ui.add_space(20.0); // Indent the subtitle path
                             let path_str = sub_path.display().to_string();
-                            ui.label(format!("📄 {}", path_str));
+                            let is_srt = sub_path.extension().map(|e| e.eq_ignore_ascii_case("srt")).unwrap_or(false);
+                            if is_srt {
+                                let text = format!("📄 {}", path_str);
+                                let font_id = egui::TextStyle::Body.resolve(ui.style());
+                                let galley_normal = ui.fonts(|f| f.layout_no_wrap(text.clone(), font_id.clone(), egui::Color32::WHITE));
+                                let galley_underlined = ui.fonts(|f| f.layout_no_wrap(text.clone(), font_id.clone(), egui::Color32::WHITE));
+                                let padding = egui::vec2(8.0, 4.0);
+                                let size = galley_normal.size() + padding;
+                                let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+                                let hovered = response.hovered();
+                                let painter = ui.painter();
+                                let text_pos = egui::pos2(
+                                    rect.left() + padding.x / 2.0,
+                                    rect.top() + padding.y / 2.0
+                                );
+                                if hovered {
+                                    // Underline using RichText and paint
+                                    let galley = ui.fonts(|f| f.layout_no_wrap(
+                                        text.clone(),
+                                        font_id.clone(),
+                                        egui::Color32::WHITE
+                                    ));
+                                    painter.galley(text_pos, galley.clone(), egui::Color32::WHITE);
+                                    // Draw underline manually
+                                    let underline_y = text_pos.y + galley.size().y - 1.0;
+                                    painter.line_segment([
+                                        egui::pos2(text_pos.x, underline_y),
+                                        egui::pos2(text_pos.x + galley.size().x, underline_y)
+                                    ], egui::Stroke::new(1.5, egui::Color32::WHITE));
+                                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                } else {
+                                    painter.galley(text_pos, galley_normal.clone(), egui::Color32::WHITE);
+                                }
+                                if response.clicked() {
+                                    if let Err(e) = Utils::open_containing_folder(sub_path) {
+                                        warn!("Failed to open folder for {}: {}", path_str, e);
+                                    }
+                                }
+                            } else {
+                                ui.label(format!("📄 {}", path_str));
+                            }
                         });
                     }
                 }
@@ -2508,6 +2548,37 @@ impl Utils {
             let percentage = (current as f32 / total as f32 * 100.0) as usize;
             format!("{}%", percentage)
         }
+    }
+
+    /// Open the containing folder of a file in the system's file explorer
+    fn open_containing_folder(path: &Path) -> Result<(), String> {
+        let folder = path.parent().ok_or("No parent folder")?;
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            let canonical = path.canonicalize().map_err(|e| e.to_string())?;
+            let path_str = canonical.to_string_lossy().replace("/", "\\");
+            let mut cmd = std::process::Command::new("explorer.exe");
+            cmd.arg("/select,").arg(&path_str);
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            cmd.spawn().map_err(|e| e.to_string())?;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let canonical = folder.canonicalize().map_err(|e| e.to_string())?;
+            let status = std::process::Command::new("xdg-open")
+                .arg(canonical)
+                .status()
+                .map_err(|e| e.to_string())?;
+            if !status.success() {
+                return Err(format!("xdg-open failed: {:?}", status));
+            }
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        {
+            return Err("Open folder not supported on this OS".to_string());
+        }
+        Ok(())
     }
 }
 
