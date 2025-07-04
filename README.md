@@ -2,21 +2,19 @@
 
 Rustitles will scan a given folder and automatically download subtitles in the selected language(s). It will scan recursively in the given folder for all video files, if missing subtitles are found, it will download them. This is built with media servers in mind, so if you have a large library of movies/tv-shows, just select the root folder used for your media server and wait for it to complete. This is a portable cross-platform application.
 
-![rustitles_1 0 4](https://github.com/user-attachments/assets/744f8c4c-34eb-4db1-9dba-80ae22fb325d)
+![rustitles_2 0 0](https://github.com/user-attachments/assets/b0e37e73-9fe4-46df-af6b-4e10e9b39a6c)
 
 ## How to install
 
 ### Windows
 - Download and install the latest version of [Microsoft Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)
-- Download the [latest release](https://github.com/fosterbarnes/rustitles/releases/download/v1.0.7/rustitles.exe) of Rustitles
+- Download the [latest release](https://github.com/fosterbarnes/rustitles/releases/download/v2.0.0/rustitles.exe) of Rustitles
 - Save rustitles.exe somewhere memorable, or just run it from your downloads folder.
 
 ### Linux
-- Ensure you have Rust installed on your system
-- Clone this repository: `git clone https://github.com/fosterbarnes/rustitles.git`
-- Run the installation script: `./install_linux.sh`
-- Build the application: `cargo build --release`
-- Run the application: `./target/release/rustitles`
+- Download the [latest release](https://github.com/fosterbarnes/rustitles/releases/download/v2.0.0/rustitles.AppImage) of Rustitles
+- Save rustitles.AppImage somewhere memorable, or just run it from your downloads folder.
+- Make it executable. Example: `chmod +x rustitles.AppImage`
 
 ## How do I use it?
 
@@ -39,21 +37,17 @@ This tool is here for the "me" of yesterday (you) who was trying to find a tool 
 - [Microsoft Visual C++ Redistributable](https://aka.ms/vs/17/release/vc_redist.x64.exe)
 - [Python](https://www.python.org/downloads/)
 - [Subliminal](https://github.com/Diaoul/subliminal)
+- [FFmpeg](https://ffmpeg.org/about.html)
 
 ### Linux
-- Python 3 and pip
-- Subliminal
-- FFmpeg
-- Rust (for building)
+- [Python](https://www.python.org/downloads/)
+- [Pipx](https://github.com/pypa/pipx)
+- [Subliminal](https://github.com/Diaoul/subliminal)
+- [FFmpeg](https://ffmpeg.org/about.html)
 
 Rustitles will automatically install Python & Subliminal, but if you'd prefer to do that manually:
 
 **Windows**: Download the latest version of Python and select "add to path" when installing. After this, open cmd or powershell and enter `pip install subliminal`. Additionally, make sure the latest version of Microsoft Visual C++ Redistributable is installed.
-
-**Linux**: Run the provided installation script: `./install_linux.sh`, or install manually:
-- Python 3: `sudo apt install python3 python3-pip` (Ubuntu/Debian/Mint) or equivalent for your distribution
-- Subliminal: `pip3 install --user subliminal`
-- FFmpeg: `sudo apt install ffmpeg` (Ubuntu/Debian/Mint) or equivalent for your distribution
 
 If you are unaware of Subliminal, it is a command line tool that uses python to find and download subtitles. If you prefer a CLI, just use Subliminal.
 
@@ -76,13 +70,6 @@ If you'd prefer to build the `.exe` yourself:
 - cd to rustitles-main e.g. ```cd "C:\Users\Foster\Downloads\rustitles-main\rustitles-main"```
 - enter ```cargo build --release```
 - You'll find your newly built .exe at `\rustitles-main\target\release\rustitles.exe`
-
-### Linux
-- Ensure you have Rust installed: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Clone this repository: `git clone https://github.com/fosterbarnes/rustitles.git`
-- Run the installation script: `./install_linux.sh`
-- Build the application: `cargo build --release`
-- The binary will be at `target/release/rustitles`
 
 Without any changes to `\src\main.rs` or `Cargo.toml` this will be identical to the official release. Just leaving this method here in case anyone feels more comfortable building themselves, or wants to tinker and make some changes.
 
