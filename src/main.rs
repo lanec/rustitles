@@ -21,7 +21,6 @@
 //! - **Validation**: Input validation and sanitization
 //! - **Utilities**: Common helper functions
 //! 
-#![windows_subsystem = "windows"]
 
 // =============================================================================
 // IMPORTS
@@ -30,38 +29,52 @@
 // Standard library imports
 use std::collections::VecDeque;
 use std::env;
-use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::ptr::null_mut;
 use std::sync::{mpsc::{self, Receiver}, Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+
+// Windows-specific imports
+#[cfg(windows)]
+use std::fs::File;
 
 // Third-party crate imports
 use eframe::egui;
 use image;
 use log::{info, warn, error, debug};
 use rfd::FileDialog;
-use reqwest::blocking::get;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use winreg::enums::*;
-use winreg::RegKey;
 
-// Windows API imports
+// Platform-specific imports
+#[cfg(windows)]
+use std::ptr::null_mut;
+#[cfg(windows)]
+use winreg::enums::*;
+#[cfg(windows)]
+use winreg::RegKey;
+#[cfg(windows)]
 use windows::Win32::Foundation::{POINT, WPARAM, LPARAM};
+#[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, GetMonitorInfoW, MONITORINFO, MONITOR_DEFAULTTONEAREST};
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, SendMessageTimeoutW, HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG
 };
 
+#[cfg(not(windows))]
+use dirs;
+#[cfg(not(windows))]
+use xdg;
+
 // =============================================================================
 // CONSTANTS
 // =============================================================================
-// CONSTANTS
-// =============================================================================
+
+/// The current application version (keep in sync with Cargo.toml)
+const APP_VERSION: &str = "2.0.0";
 
 /// Supported video file extensions for subtitle scanning
 static VIDEO_EXTENSIONS: &[&str] = &[
@@ -79,8 +92,13 @@ static DEFAULT_CONCURRENT_DOWNLOADS: usize = 25;
 /// Maximum concurrent downloads
 static MAX_CONCURRENT_DOWNLOADS: usize = 100;
 
-/// Python installer URL
-static PYTHON_INSTALLER_URL: &str = "https://www.python.org/ftp/python/3.13.5/python-3.13.5-amd64.exe";
+/// Python installer URL (Windows-specific)
+#[cfg(windows)]
+static _PYTHON_INSTALLER_URL: &str = "https://www.python.org/ftp/python/3.13.5/python-3.13.5-amd64.exe";
+
+/// Python installer URL (Linux-specific)
+#[cfg(not(windows))]
+static _PYTHON_INSTALLER_URL: &str = "https://www.python.org/ftp/python/3.13.5/python-3.13.5-amd64.exe";
 
 /// Default window size
 static WINDOW_SIZE: [f32; 2] = [800.0, 530.0];
@@ -150,11 +168,33 @@ impl Default for Settings {
 impl Settings {
     /// Get the path where settings are stored
     fn get_path() -> std::io::Result<PathBuf> {
-        let exe_path = env::current_exe()?;
-        let exe_dir = exe_path.parent().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to get executable directory")
-        })?;
-        Ok(exe_dir.join("rustitles_settings.json"))
+        #[cfg(windows)]
+        {
+            let exe_path = env::current_exe()?;
+            let exe_dir = exe_path.parent().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to get executable directory")
+            })?;
+            Ok(exe_dir.join("rustitles_settings.json"))
+        }
+        
+        #[cfg(not(windows))]
+        {
+            // Use XDG config directory on Linux
+            if let Ok(xdg_dirs) = xdg::BaseDirectories::new() {
+                let config_dir = xdg_dirs.get_config_home();
+                let app_dir = config_dir.join("rustitles");
+                std::fs::create_dir_all(&app_dir)?;
+                Ok(app_dir.join("settings.json"))
+            } else {
+                // Fallback to home directory
+                let home_dir = dirs::home_dir().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to get home directory")
+                })?;
+                let app_dir = home_dir.join(".rustitles");
+                std::fs::create_dir_all(&app_dir)?;
+                Ok(app_dir.join("settings.json"))
+            }
+        }
     }
 
     /// Load settings from disk, falling back to defaults if file doesn't exist
@@ -224,10 +264,32 @@ impl AsyncLogger {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let (tx, rx) = mpsc::channel();
         
-        // Get the directory where the executable is located
-        let exe_path = env::current_exe()?;
-        let exe_dir = exe_path.parent().ok_or("Failed to get executable directory")?;
-        let log_path = exe_dir.join("rustitles_log.txt");
+        // Get the log file path based on platform
+        let log_path = {
+            #[cfg(windows)]
+            {
+                let exe_path = env::current_exe()?;
+                let exe_dir = exe_path.parent().ok_or("Failed to get executable directory")?;
+                exe_dir.join("rustitles_log.txt")
+            }
+            
+            #[cfg(not(windows))]
+            {
+                // Use XDG cache directory on Linux
+                if let Ok(xdg_dirs) = xdg::BaseDirectories::new() {
+                    let cache_dir = xdg_dirs.get_cache_home();
+                    let app_dir = cache_dir.join("rustitles");
+                    std::fs::create_dir_all(&app_dir)?;
+                    app_dir.join("rustitles.log")
+                } else {
+                    // Fallback to home directory
+                    let home_dir = dirs::home_dir().ok_or("Failed to get home directory")?;
+                    let app_dir = home_dir.join(".rustitles");
+                    std::fs::create_dir_all(&app_dir)?;
+                    app_dir.join("rustitles.log")
+                }
+            }
+        };
         
         // Create or open the log file
         let log_file = std::fs::OpenOptions::new()
@@ -337,7 +399,8 @@ struct PythonManager;
 impl PythonManager {
     /// Check if Python is installed and return its version
     fn get_version() -> Option<String> {
-        for cmd in &["python", "py"] {
+        // On Linux, check python3 first, then python, then py
+        for cmd in &["python3", "python", "py"] {
             if let Ok(output) = Self::run_command_hidden(cmd, &["--version"], &std::collections::HashMap::new()) {
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -356,7 +419,7 @@ impl PythonManager {
 
     /// Check if Subliminal is installed
     fn is_subliminal_installed() -> bool {
-        // First check if subliminal command is directly available
+        // First check if subliminal command is directly available (works for both pip and pipx installations)
         if let Ok(output) = Self::run_command_hidden("subliminal", &["--version"], &std::collections::HashMap::new()) {
             if output.status.success() {
                 debug!("Subliminal found as direct command");
@@ -364,8 +427,19 @@ impl PythonManager {
             }
         }
         
-        // Then check as Python module with multiple Python commands
-        for cmd in &["python", "py", "python3"] {
+        // Check if installed via pipx
+        if let Ok(output) = Self::run_command_hidden("pipx", &["list"], &std::collections::HashMap::new()) {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.to_lowercase().contains("subliminal") {
+                    debug!("Subliminal found via pipx list");
+                    return true;
+                }
+            }
+        }
+        
+        // Then check as Python module with multiple Python commands (for pip installations)
+        for cmd in &["python3", "python", "py"] {
             if let Ok(output) = Self::run_command_hidden(cmd, &["-m", "pip", "show", "subliminal"], &std::collections::HashMap::new()) {
                 if output.status.success() {
                     debug!("Subliminal found via pip show using {}", cmd);
@@ -385,123 +459,227 @@ impl PythonManager {
         false
     }
 
-    /// Install Subliminal via pip
+    /// Install Subliminal via pipx (Linux) or pip (Windows)
     fn install_subliminal() -> bool {
-        info!("Installing Subliminal via pip");
-        for cmd in &["python", "py", "python3"] {
-            if let Ok(output) = Self::run_command_hidden(cmd, &["-m", "pip", "install", "subliminal"], &std::collections::HashMap::new()) {
+        #[cfg(windows)]
+        {
+            info!("Installing Subliminal via pip on Windows");
+            for cmd in &["python", "py", "python3"] {
+                if let Ok(output) = Self::run_command_hidden(cmd, &["-m", "pip", "install", "subliminal"], &std::collections::HashMap::new()) {
+                    if output.status.success() {
+                        info!("Subliminal installed successfully using {}", cmd);
+                        return true;
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        warn!("Failed to install Subliminal using {}: {}", cmd, stderr);
+                    }
+                }
+            }
+            error!("Failed to install Subliminal with all Python commands");
+            false
+        }
+        
+        #[cfg(not(windows))]
+        {
+            info!("Installing Subliminal via pipx on Linux");
+            
+            // First, try to install pipx if it's not available
+            if let Ok(output) = Self::run_command_hidden("pipx", &["--version"], &std::collections::HashMap::new()) {
+                if !output.status.success() {
+                    info!("pipx not found, attempting to install pipx first");
+                    // Try to install pipx using different methods
+                    let pipx_install_attempts = [
+                        ("python3", vec!["-m", "pip", "install", "--user", "pipx"]),
+                        ("python", vec!["-m", "pip", "install", "--user", "pipx"]),
+                        ("apt", vec!["install", "-y", "python3-pipx"]),
+                        ("dnf", vec!["install", "-y", "python3-pipx"]),
+                        ("pacman", vec!["-S", "--noconfirm", "python-pipx"]),
+                    ];
+                    
+                    for (cmd, args) in &pipx_install_attempts {
+                        let args_refs: Vec<&str> = args.iter().map(|s| &**s).collect();
+                        if let Ok(output) = Self::run_command_hidden(cmd, &args_refs, &std::collections::HashMap::new()) {
+                            if output.status.success() {
+                                info!("pipx installed successfully using {}", cmd);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Now try to install subliminal using pipx
+            if let Ok(output) = Self::run_command_hidden("pipx", &["install", "subliminal"], &std::collections::HashMap::new()) {
                 if output.status.success() {
-                    info!("Subliminal installed successfully using {}", cmd);
+                    info!("Subliminal installed successfully using pipx");
                     return true;
                 } else {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    warn!("Failed to install Subliminal using {}: {}", cmd, stderr);
+                    warn!("Failed to install Subliminal using pipx: {}", stderr);
                 }
             }
+            
+            // Fallback to pip install if pipx fails
+            info!("pipx installation failed, trying pip install as fallback");
+            for cmd in &["python3", "python"] {
+                if let Ok(output) = Self::run_command_hidden(cmd, &["-m", "pip", "install", "--user", "subliminal"], &std::collections::HashMap::new()) {
+                    if output.status.success() {
+                        info!("Subliminal installed successfully using {} pip", cmd);
+                        return true;
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        warn!("Failed to install Subliminal using {} pip: {}", cmd, stderr);
+                    }
+                }
+            }
+            
+            error!("Failed to install Subliminal with pipx and pip fallback");
+            false
         }
-        error!("Failed to install Subliminal with all Python commands");
-        false
     }
 
     /// Add Python Scripts directory to PATH
     fn add_scripts_to_path() -> Result<(), String> {
-        let mut base_path = None;
+        #[cfg(windows)]
+        {
+            let mut base_path = None;
 
-        for cmd in &["python", "py"] {
-            let output = Self::run_command_hidden(cmd, &["-m", "site", "--user-base"], &std::collections::HashMap::new());
+            for cmd in &["python", "py"] {
+                let output = Self::run_command_hidden(cmd, &["-m", "site", "--user-base"], &std::collections::HashMap::new());
 
-            match output {
-                Ok(output) if output.status.success() => {
-                    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if !path.is_empty() {
-                        base_path = Some(path);
-                        break;
+                match output {
+                    Ok(output) if output.status.success() => {
+                        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if !path.is_empty() {
+                            base_path = Some(path);
+                            break;
+                        }
+                    }
+                    Ok(output) => {
+                        let err = String::from_utf8_lossy(&output.stderr);
+                        eprintln!("Failed to get user base with {}: {}", cmd, err);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to execute {}: {}", cmd, e);
                     }
                 }
-                Ok(output) => {
-                    let err = String::from_utf8_lossy(&output.stderr);
-                    eprintln!("Failed to get user base with {}: {}", cmd, err);
-                }
-                Err(e) => {
-                    eprintln!("Failed to execute {}: {}", cmd, e);
+            }
+
+            let base_path = base_path.ok_or_else(|| "Failed to get user base path from python/py".to_string())?;
+            let scripts_path = format!("{}\\Scripts", base_path);
+
+            let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+            let env = hkcu.open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
+                .map_err(|e| format!("Failed to open registry: {}", e))?;
+
+            let current_path: String = env.get_value("Path").unwrap_or_else(|_| "".into());
+
+            if !current_path.to_lowercase().contains(&scripts_path.to_lowercase()) {
+                let new_path = if current_path.trim().is_empty() {
+                    scripts_path.clone()
+                } else {
+                    format!("{current_path};{scripts_path}")
+                };
+
+                env.set_value("Path", &new_path)
+                    .map_err(|e| format!("Failed to set PATH: {}", e))?;
+
+                unsafe {
+                    let param = "Environment\0"
+                        .encode_utf16()
+                        .collect::<Vec<u16>>();
+
+                    SendMessageTimeoutW(
+                        HWND_BROADCAST,
+                        WM_SETTINGCHANGE,
+                        WPARAM(0),
+                        LPARAM(param.as_ptr() as isize),
+                        SMTO_ABORTIFHUNG,
+                        5000,
+                        Some(null_mut()),
+                    );
                 }
             }
+
+            Ok(())
         }
-
-        let base_path = base_path.ok_or_else(|| "Failed to get user base path from python/py".to_string())?;
-        let scripts_path = format!("{}\\Scripts", base_path);
-
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let env = hkcu.open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
-            .map_err(|e| format!("Failed to open registry: {}", e))?;
-
-        let current_path: String = env.get_value("Path").unwrap_or_else(|_| "".into());
-
-        if !current_path.to_lowercase().contains(&scripts_path.to_lowercase()) {
-            let new_path = if current_path.trim().is_empty() {
-                scripts_path.clone()
-            } else {
-                format!("{current_path};{scripts_path}")
-            };
-
-            env.set_value("Path", &new_path)
-                .map_err(|e| format!("Failed to set PATH: {}", e))?;
-
-            unsafe {
-                let param = "Environment\0"
-                    .encode_utf16()
-                    .collect::<Vec<u16>>();
-
-                SendMessageTimeoutW(
-                    HWND_BROADCAST,
-                    WM_SETTINGCHANGE,
-                    WPARAM(0),
-                    LPARAM(param.as_ptr() as isize),
-                    SMTO_ABORTIFHUNG,
-                    5000,
-                    Some(null_mut()),
-                );
+        
+        #[cfg(not(windows))]
+        {
+            // On Linux, Python scripts are typically already in PATH via pip
+            // Just ensure the user's local bin directory is in PATH
+            let home_dir = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
+            let local_bin = home_dir.join(".local").join("bin");
+            
+            if local_bin.exists() {
+                // Add to current process PATH
+                let current_path = env::var("PATH").unwrap_or_default();
+                if !current_path.contains(local_bin.to_string_lossy().as_ref()) {
+                    let new_path = format!("{}:{}", local_bin.display(), current_path);
+                    env::set_var("PATH", new_path);
+                }
             }
+            
+            Ok(())
         }
-
-        Ok(())
     }
 
     /// Refresh environment variables to pick up PATH changes
     fn refresh_environment() -> Result<(), String> {
-        // Get the updated PATH from registry
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let env = hkcu.open_subkey_with_flags("Environment", KEY_READ)
-            .map_err(|e| format!("Failed to open registry: {}", e))?;
+        #[cfg(windows)]
+        {
+            // Get the updated PATH from registry
+            let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+            let env = hkcu.open_subkey_with_flags("Environment", KEY_READ)
+                .map_err(|e| format!("Failed to open registry: {}", e))?;
 
-        let user_path: String = env.get_value("Path").unwrap_or_else(|_| "".into());
+            let user_path: String = env.get_value("Path").unwrap_or_else(|_| "".into());
+            
+            // Get system PATH
+            let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+            let sys_env = hklm.open_subkey_with_flags("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", KEY_READ)
+                .map_err(|e| format!("Failed to open system registry: {}", e))?;
+            
+            let system_path: String = sys_env.get_value("Path").unwrap_or_else(|_| "".into());
+            
+            // Combine system and user paths
+            let combined_path = if system_path.trim().is_empty() {
+                user_path
+            } else if user_path.trim().is_empty() {
+                system_path
+            } else {
+                format!("{system_path};{user_path}")
+            };
+            
+            // Update current process environment
+            std::env::set_var("PATH", combined_path);
+            
+            Ok(())
+        }
         
-        // Get system PATH
-        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
-        let sys_env = hklm.open_subkey_with_flags("SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment", KEY_READ)
-            .map_err(|e| format!("Failed to open system registry: {}", e))?;
-        
-        let system_path: String = sys_env.get_value("Path").unwrap_or_else(|_| "".into());
-        
-        // Combine system and user paths
-        let combined_path = if system_path.trim().is_empty() {
-            user_path
-        } else if user_path.trim().is_empty() {
-            system_path
-        } else {
-            format!("{system_path};{user_path}")
-        };
-        
-        // Update current process environment
-        std::env::set_var("PATH", combined_path);
-        
-        Ok(())
+        #[cfg(not(windows))]
+        {
+            // On Linux, reload environment from shell profile
+            let home_dir = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
+            let local_bin = home_dir.join(".local").join("bin");
+            
+            if local_bin.exists() {
+                let current_path = env::var("PATH").unwrap_or_default();
+                if !current_path.contains(local_bin.to_string_lossy().as_ref()) {
+                    let new_path = format!("{}:{}", local_bin.display(), current_path);
+                    env::set_var("PATH", new_path);
+                }
+            }
+            
+            Ok(())
+        }
     }
 
+    #[cfg(windows)]
     /// Download Python installer from official website
     fn download_installer() -> io::Result<PathBuf> {
-        let url = PYTHON_INSTALLER_URL;
-        let response = get(url).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let url = _PYTHON_INSTALLER_URL;
+        let response = reqwest::blocking::get(url).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         let temp_dir = env::temp_dir();
         let installer_path = temp_dir.join("python-installer.exe");
@@ -511,9 +689,10 @@ impl PythonManager {
         Ok(installer_path)
     }
 
+    #[cfg(windows)]
     /// Install Python silently with required options
-    fn install_silent(installer_path: &PathBuf) -> io::Result<bool> {
-        let mut command = Command::new(installer_path);
+    fn install_silent(_installer_path: &PathBuf) -> io::Result<bool> {
+        let mut command = Command::new(_installer_path);
         command.args(&[
             "/quiet",
             "InstallAllUsers=1",
@@ -522,11 +701,8 @@ impl PythonManager {
         ]);
         
         // On Windows, try to hide the console window
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        }
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         
         let status = command.status()?;
         Ok(status.success())
@@ -554,8 +730,47 @@ impl PythonManager {
             command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
         
+        // On Linux, we can't hide the window but we can redirect output
+        #[cfg(not(windows))]
+        {
+            // Set environment variables to suppress some output
+            command.env("DEBIAN_FRONTEND", "noninteractive");
+            command.env("PYTHONUNBUFFERED", "1");
+        }
+        
         command.output()
     }
+
+    /// Check if pipx is available
+    fn _pipx_available() -> bool {
+        if let Ok(output) = Self::run_command_hidden("pipx", &["--version"], &std::collections::HashMap::new()) {
+            return output.status.success();
+        }
+        false
+    }
+
+    /// Try to install pipx using common methods
+    #[allow(dead_code)]
+    fn try_install_pipx() -> bool {
+        let install_attempts = [
+            ("python3", vec!["-m", "pip", "install", "--user", "pipx"]),
+            ("python", vec!["-m", "pip", "install", "--user", "pipx"]),
+            ("apt", vec!["install", "-y", "python3-pipx"]),
+            ("dnf", vec!["install", "-y", "python3-pipx"]),
+            ("pacman", vec!["-S", "--noconfirm", "python-pipx"]),
+        ];
+        for (cmd, args) in &install_attempts {
+            let args_refs: Vec<&str> = args.iter().map(|s| &**s).collect();
+            if let Ok(output) = Self::run_command_hidden(cmd, &args_refs, &std::collections::HashMap::new()) {
+                if output.status.success() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+
 }
 
 // =============================================================================
@@ -660,6 +875,13 @@ impl SubtitleUtils {
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
+        
+        // On Linux, we can't hide the window but we can redirect output
+        #[cfg(not(windows))]
+        {
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+        }
         let output = cmd.output();
         if let Ok(output) = output {
             if output.status.success() {
@@ -739,6 +961,7 @@ enum JobStatus {
 }
 
 /// Represents a single subtitle download job
+#[derive(Clone)]
 struct DownloadJob {
     video_path: PathBuf,
     status: JobStatus,
@@ -759,6 +982,7 @@ struct SubtitleDownloader {
     // Python/Subliminal state
     python_installed: bool,
     python_version: Option<String>,
+    pipx_installed: bool,
     subliminal_installed: bool,
     installing_python: bool,
     installing_subliminal: bool,
@@ -781,32 +1005,122 @@ struct SubtitleDownloader {
 
     // UI status
     status: String,
+    pipx_copied: bool, // Add this field to track copy state
+    pipx_copy_time: Option<std::time::Instant>, // For timing the copied message
+    
+    // Auto-refresh state (unused but kept for potential future use)
+    #[allow(dead_code)]
+    last_refresh_time: std::time::Instant,
+    #[allow(dead_code)]
+    refresh_interval: std::time::Duration,
+    
+    // Cached jobs for UI rendering (to avoid cloning every frame)
+    cached_jobs: Vec<DownloadJob>,
+    last_jobs_update: std::time::Instant,
+    
+    // Background installation status checking
+    background_check_handle: Option<thread::JoinHandle<()>>,
+    background_check_sender: Option<mpsc::Sender<(bool, bool)>>, // (_pipx_available, subliminal_installed)
+    background_check_receiver: Option<mpsc::Receiver<(bool, bool)>>,
+
+    // Version check state
+    latest_version: Option<String>,
+    version_check_error: Option<String>,
+    version_checked: bool,
 }
 
 impl Default for SubtitleDownloader {
     fn default() -> Self {
         info!("Initializing SubtitleDownloader");
-        
         // Load saved settings
         let settings = Settings::load();
         info!("Loaded settings: languages={:?}, force={}, overwrite={}, concurrent={}", 
               settings.selected_languages, settings.force_download, settings.overwrite_existing, settings.concurrent_downloads);
-        
         let python_version = PythonManager::get_version();
         let python_installed = python_version.is_some();
+        #[cfg(not(windows))]
+        let pipx_installed = {
+            if python_installed {
+                let available = PythonManager::_pipx_available();
+                if !available {
+                    info!("pipx not found, attempting to install pipx");
+                    if PythonManager::try_install_pipx() {
+                        PythonManager::_pipx_available()
+                    } else {
+                        false
+                    }
+                } else {
+                    available
+                }
+            } else {
+                false
+            }
+        };
+        #[cfg(windows)]
+        let pipx_installed = true; // Not used on Windows
+        #[cfg(windows)]
         let subliminal_installed = if python_installed {
             PythonManager::is_subliminal_installed()
         } else {
             false
         };
-
+        
+        #[cfg(not(windows))]
+        let subliminal_installed = if python_installed && pipx_installed {
+            PythonManager::is_subliminal_installed()
+        } else {
+            false
+        };
+        
+        // Start background installation status checking
+        let (tx, rx) = mpsc::channel();
+        let tx_clone = tx.clone();
+        let background_handle = thread::spawn(move || {
+            loop {
+                #[cfg(windows)]
+                {
+                    // On Windows, just check subliminal directly
+                    let subliminal_installed = PythonManager::is_subliminal_installed();
+                    if tx_clone.send((true, subliminal_installed)).is_err() {
+                        break; // Main thread has closed
+                    }
+                    if subliminal_installed {
+                        break;
+                    }
+                }
+                
+                #[cfg(not(windows))]
+                {
+                    // Check pipx availability
+                    let _pipx_available = PythonManager::_pipx_available();
+                    
+                    // Check subliminal availability if pipx is available
+                    let subliminal_installed = if _pipx_available {
+                        PythonManager::is_subliminal_installed()
+                    } else {
+                        false
+                    };
+                    
+                    // Send results to main thread
+                    if tx_clone.send((_pipx_available, subliminal_installed)).is_err() {
+                        break; // Main thread has closed
+                    }
+                    // If both are installed, stop checking
+                    if _pipx_available && subliminal_installed {
+                        break;
+                    }
+                }
+                
+                // Sleep for 5 seconds before next check
+                thread::sleep(std::time::Duration::from_secs(5));
+            }
+        });
         info!("Python installed: {}, version: {:?}", python_installed, python_version);
+        info!("pipx installed: {}", pipx_installed);
         info!("Subliminal installed: {}", subliminal_installed);
-
-        let installing_subliminal = python_installed && !subliminal_installed;
+        let installing_subliminal = python_installed && pipx_installed && !subliminal_installed;
         let subliminal_install_result = Arc::new(Mutex::new(None));
-
-        if python_installed && !subliminal_installed {
+        if python_installed && pipx_installed && !subliminal_installed {
             info!("Starting automatic Subliminal installation");
             let result_ptr = Arc::clone(&subliminal_install_result);
             std::thread::spawn(move || {
@@ -817,13 +1131,12 @@ impl Default for SubtitleDownloader {
                         Err(e) => Err(format!("Subliminal installed, but failed to update PATH: {}", e)),
                     }
                 } else {
-                    Err("pip install failed".to_string())
+                    Err("pipx/pip install failed".to_string())
                 };
                 *result_ptr.lock().unwrap() = Some(result);
             });
         }
-
-        Self {
+        let mut downloader = Self {
             downloads_completed: 0,
             total_downloads: 0,
             is_downloading: false,
@@ -833,6 +1146,7 @@ impl Default for SubtitleDownloader {
             download_jobs: Arc::new(Mutex::new(Vec::new())),
             python_installed,
             python_version,
+            pipx_installed,
             subliminal_installed,
             installing_python: false,
             installing_subliminal,
@@ -848,12 +1162,54 @@ impl Default for SubtitleDownloader {
             videos_missing_subs: Arc::new(Mutex::new(Vec::new())),
             scanning: false,
             scan_done_receiver: None,
-            status: if python_installed && !subliminal_installed {
-                "Python detected. Installing Subliminal...".to_string()
+            status: if python_installed && pipx_installed && !subliminal_installed {
+                "Python and pipx detected. Installing Subliminal...".to_string()
             } else {
                 "Ready".to_string()
             },
-        }
+            pipx_copied: false,
+            pipx_copy_time: None,
+            last_refresh_time: std::time::Instant::now(),
+            refresh_interval: std::time::Duration::from_secs(2), // Check every 2 seconds
+            cached_jobs: Vec::new(),
+            last_jobs_update: std::time::Instant::now(),
+            background_check_handle: Some(background_handle),
+            background_check_sender: Some(tx),
+            background_check_receiver: Some(rx),
+            latest_version: None,
+            version_check_error: None,
+            version_checked: false,
+        };
+        // Start version check in background (use static VERSION_PTR)
+        let version_ptr_clone = VERSION_PTR.clone();
+        std::thread::spawn(move || {
+            let url = "https://api.github.com/repos/fosterbarnes/rustitles/releases/latest";
+            let client = reqwest::blocking::Client::new();
+            let resp = client.get(url)
+                .header("User-Agent", "rustitles-version-check")
+                .send();
+            let (mut latest, mut err, mut checked) = (None, None, true);
+            match resp {
+                Ok(r) => {
+                    if let Ok(json) = r.json::<serde_json::Value>() {
+                        if let Some(tag) = json.get("tag_name").and_then(|v| v.as_str()) {
+                            latest = Some(tag.to_string());
+                        } else {
+                            err = Some("No tag_name in response".to_string());
+                        }
+                    } else {
+                        err = Some("Failed to parse JSON".to_string());
+                    }
+                }
+                Err(e) => {
+                    err = Some(format!("HTTP error: {}", e));
+                }
+            }
+            let mut lock = version_ptr_clone.lock().unwrap();
+            *lock = (latest, err, checked);
+        });
+        // Poll for version check result in update()
+        downloader
     }
 }
 
@@ -897,6 +1253,7 @@ impl SubtitleDownloader {
             let mut jobs = self.download_jobs.lock().unwrap();
             jobs.clear();
         }
+        self.cached_jobs.clear(); // Also clear cached jobs
 
         // Reset downloading flag when starting new scan
         self.downloading = false;
@@ -970,6 +1327,7 @@ impl SubtitleDownloader {
 
         self.total_downloads = jobs.len();
         *self.download_jobs.lock().unwrap() = jobs;
+        self.cached_jobs.clear(); // Clear cached jobs when starting new downloads
         self.downloading = true;
 
         self.cancel_flag.store(false, Ordering::SeqCst);
@@ -1168,17 +1526,31 @@ impl SubtitleDownloader {
         }));
     }
 
+    /// Update cached jobs if needed (to avoid cloning every frame)
+    fn update_cached_jobs(&mut self) {
+        let now = std::time::Instant::now();
+        // Update cache every 500ms to improve performance
+        if now.duration_since(self.last_jobs_update) >= std::time::Duration::from_millis(500) {
+            if let Ok(jobs) = self.download_jobs.lock() {
+                self.cached_jobs = jobs.clone();
+                self.last_jobs_update = now;
+            }
+        }
+    }
+
     /// Check if all downloads are complete and update progress
     fn check_download_completion(&mut self) {
         if !self.downloading {
             return;
         }
 
-        // Update progress in real-time
-        let jobs = self.download_jobs.lock().unwrap();
-        let success_count = jobs.iter().filter(|j| j.status == JobStatus::Success || matches!(j.status, JobStatus::EmbeddedExists(_))).count();
-        let running_count = jobs.iter().filter(|j| j.status == JobStatus::Running).count();
-        let failed_count = jobs.iter().filter(|j| matches!(j.status, JobStatus::Failed(_))).count();
+        // Update cached jobs if needed
+        self.update_cached_jobs();
+        
+        // Use cached jobs for progress calculations
+        let success_count = self.cached_jobs.iter().filter(|j| j.status == JobStatus::Success || matches!(j.status, JobStatus::EmbeddedExists(_))).count();
+        let running_count = self.cached_jobs.iter().filter(|j| j.status == JobStatus::Running).count();
+        let failed_count = self.cached_jobs.iter().filter(|j| matches!(j.status, JobStatus::Failed(_))).count();
         
         let previous_completed = self.downloads_completed;
         self.downloads_completed = success_count;
@@ -1195,9 +1567,9 @@ impl SubtitleDownloader {
                 self.downloading = false;
                 self.download_thread_handle = None;
                 
-                // Count completed jobs
-                let failed_count = jobs.iter().filter(|j| matches!(j.status, JobStatus::Failed(_))).count();
-                let success_count = jobs.iter().filter(|j| j.status == JobStatus::Success || matches!(j.status, JobStatus::EmbeddedExists(_))).count();
+                // Count completed jobs using cached jobs
+                let failed_count = self.cached_jobs.iter().filter(|j| matches!(j.status, JobStatus::Failed(_))).count();
+                let success_count = self.cached_jobs.iter().filter(|j| j.status == JobStatus::Success || matches!(j.status, JobStatus::EmbeddedExists(_))).count();
                 
                 info!("Download session completed: {} successful, {} failed", success_count, failed_count);
                 self.status = format!("Subtitle jobs completed: {} successful, {} failed", success_count, failed_count);
@@ -1207,6 +1579,95 @@ impl SubtitleDownloader {
                 if running_count > 0 {
                     self.status = format!("Downloading: {} completed, {} running, {} pending", 
                         success_count, running_count, self.total_downloads - success_count - running_count);
+                }
+            }
+        }
+    }
+
+    /// Refresh installation status using background thread results
+    fn refresh_installation_status(&mut self) {
+        // Collect all available messages first
+        let mut last_status = None;
+        if let Some(receiver) = &self.background_check_receiver {
+            while let Ok(status) = receiver.try_recv() {
+                last_status = Some(status);
+            }
+        }
+        if let Some((_pipx_available, subliminal_installed)) = last_status {
+            let _old_pipx = self.pipx_installed;
+            let old_subliminal = self.subliminal_installed;
+
+            #[cfg(not(windows))]
+            {
+                self.pipx_installed = _pipx_available;
+            }
+            #[cfg(windows)]
+            {
+                self.pipx_installed = true; // Not used on Windows
+            }
+
+            #[cfg(windows)]
+            {
+                // On Windows, just check if subliminal is installed
+                if self.python_installed {
+                    self.subliminal_installed = subliminal_installed;
+                }
+            }
+            
+            #[cfg(not(windows))]
+            {
+                // On Linux, check if both pipx and subliminal are available
+                if self.python_installed && self.pipx_installed {
+                    self.subliminal_installed = subliminal_installed;
+                }
+            }
+
+            // If pipx became available (Linux only), start installing subliminal automatically
+            #[cfg(not(windows))]
+            {
+                if !_old_pipx && self.pipx_installed && !self.subliminal_installed {
+                    info!("pipx became available, starting automatic Subliminal installation");
+                    self.status = "pipx detected! Installing Subliminal...".to_string();
+                    self.installing_subliminal = true;
+                    let result_ptr = self.subliminal_install_result.clone();
+
+                    std::thread::spawn(move || {
+                        let success = PythonManager::install_subliminal();
+                        let result = if success {
+                            match PythonManager::add_scripts_to_path() {
+                                Ok(_) => Ok(()),
+                                Err(e) => Err(format!("Subliminal installed, but failed to update PATH: {}", e)),
+                            }
+                        } else {
+                            Err("pipx/pip install failed".to_string())
+                        };
+                        *result_ptr.lock().unwrap() = Some(result);
+                    });
+                }
+            }
+
+            // If subliminal became available, update status
+            if !old_subliminal && self.subliminal_installed {
+                info!("Subliminal became available");
+                self.status = "✅ All dependencies installed! Ready to download subtitles.".to_string();
+            }
+            
+            // Stop background checking and free resources
+            #[cfg(windows)]
+            {
+                if self.subliminal_installed {
+                    self.background_check_handle = None;
+                    self.background_check_sender = None;
+                    self.background_check_receiver = None;
+                }
+            }
+            
+            #[cfg(not(windows))]
+            {
+                if self.pipx_installed && self.subliminal_installed {
+                    self.background_check_handle = None;
+                    self.background_check_sender = None;
+                    self.background_check_receiver = None;
                 }
             }
         }
@@ -1278,7 +1739,8 @@ impl SubtitleDownloader {
 
     /// Render the application header
     fn render_header(&self, ui: &mut egui::Ui) {
-        ui.heading(egui::RichText::new("Rustitles - Subtitle Downloader Tool").color(egui::Color32::from_rgb(189, 147, 249)));
+        let title = format!("Rustitles v{} - Subtitle Downloader Tool ", APP_VERSION);
+        ui.heading(egui::RichText::new(title).color(egui::Color32::from_rgb(189, 147, 249)));
         ui.add_space(5.0);
     }
 
@@ -1297,6 +1759,7 @@ impl SubtitleDownloader {
             ));
         } else {
             ui.label("❌ Python not found");
+            #[cfg(windows)]
             if ui.button("Install Python").clicked() {
                 info!("User initiated Python installation");
                 self.status = "Installing Python 3.13.5... (Please check your taskbar for a UAC prompt and accept)".to_string();
@@ -1313,12 +1776,58 @@ impl SubtitleDownloader {
                     *result_ptr.lock().unwrap() = Some(result);
                 });
             }
+            #[cfg(not(windows))]
+            {
+                ui.label("Please install Python 3 and python3-pip using your package manager, then restart Rustitles.");
+            }
+        }
+    }
+
+    /// Render pipx installation status (Linux only)
+    fn render_pipx_status(&mut self, _ui: &mut egui::Ui) {
+        #[cfg(not(windows))]
+        {
+            if self.python_installed {
+                if self.pipx_installed {
+                    _ui.label("✅ pipx is installed");
+                } else {
+                    _ui.label("❌ pipx not found");
+                }
+            }
         }
     }
 
     /// Render Subliminal installation status
     fn render_subliminal_status(&mut self, ui: &mut egui::Ui) {
         if self.python_installed {
+            #[cfg(not(windows))]
+            {
+                // On Linux, only show install button if pipx is available
+                if !self.pipx_installed {
+                    ui.label("❌ Subliminal not found");
+                    ui.horizontal(|ui| {
+                        ui.label("Install missing dependencies:");
+                        let cmd = "sudo apt install pipx && pipx install subliminal".to_string();
+                        let mut cmd_edit = cmd.clone();
+                        ui.add(egui::TextEdit::singleline(&mut cmd_edit)
+                            .desired_width(350.0)
+                            .interactive(false)
+                            .font(egui::TextStyle::Monospace)
+                            .horizontal_align(egui::Align::Center));
+                        let copy_icon = egui::RichText::new("📋").size(18.0);
+                        if ui.add(egui::Button::new(copy_icon)).on_hover_text("Copy to clipboard").clicked() {
+                            ui.output_mut(|o| o.copied_text = cmd.clone());
+                            self.pipx_copied = true;
+                            self.pipx_copy_time = Some(std::time::Instant::now());
+                        }
+                        if self.pipx_copied {
+                            ui.label(egui::RichText::new("Copied!").color(egui::Color32::from_rgb(80, 250, 123)));
+                        }
+                    });
+                    return;
+                }
+            }
+            
             if self.subliminal_installed {
                 ui.label("✅ Subliminal is installed");
             } else {
@@ -1342,6 +1851,37 @@ impl SubtitleDownloader {
                         *result_ptr.lock().unwrap() = Some(result);
                     });
                 }
+            }
+        }
+        // Version check warning
+        if self.version_checked {
+            if let Some(latest) = &self.latest_version {
+                if Self::is_outdated(APP_VERSION, latest) {
+                    let exe_url = if cfg!(target_os = "windows") {
+                        format!("https://github.com/fosterbarnes/rustitles/releases/download/{}/rustitles.exe", latest)
+                    } else if cfg!(target_os = "linux") {
+                        format!("https://github.com/fosterbarnes/rustitles/releases/download/{}/rustitles_linux", latest)
+                    } else {
+                        format!("https://github.com/fosterbarnes/rustitles/releases/download/{}/rustitles", latest)
+                    };
+                    let link_text = format!("-> Rustitles {}", latest);
+                    let link_rich = egui::RichText::new(link_text).color(egui::Color32::from_rgb(80, 160, 255));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(egui::RichText::new("Your version is out of date. Download the latest release: ").color(egui::Color32::from_rgb(255, 85, 85)));
+                        let resp = ui.hyperlink_to(link_rich, exe_url);
+                        if resp.hovered() {
+                            let painter = ui.painter();
+                            let rect = resp.rect;
+                            let y = rect.bottom() - 2.0;
+                            painter.line_segment([
+                                egui::pos2(rect.left(), y),
+                                egui::pos2(rect.right(), y)
+                            ], egui::Stroke::new(1.5, egui::Color32::from_rgb(80, 160, 255)));
+                        }
+                    });
+                }
+            } else if let Some(err) = &self.version_check_error {
+                ui.label(egui::RichText::new(format!("Version check failed: {}", err)).color(egui::Color32::from_rgb(255, 184, 108)));
             }
         }
     }
@@ -1476,8 +2016,21 @@ impl SubtitleDownloader {
     /// Render scan results summary
     fn render_scan_results(&self, ui: &mut egui::Ui) {
         if !self.folder_path.is_empty() {
-            let scanned_count = self.scanned_videos.lock().unwrap().len();
-            let missing_count = self.videos_missing_subs.lock().unwrap().len();
+            // Take quick snapshots to minimize lock time
+            let scanned_count = {
+                if let Ok(videos) = self.scanned_videos.lock() {
+                    videos.len()
+                } else {
+                    0
+                }
+            };
+            let missing_count = {
+                if let Ok(videos) = self.videos_missing_subs.lock() {
+                    videos.len()
+                } else {
+                    0
+                }
+            };
             ui.label(format!("Found videos: {}", scanned_count));
             if self.overwrite_existing {
                 ui.label(format!("Overwriting {} Subtitles", missing_count));
@@ -1488,114 +2041,80 @@ impl SubtitleDownloader {
     }
 
     /// Render download jobs status
-    fn render_download_jobs(&self, ui: &mut egui::Ui) {
-        let jobs = self.download_jobs.lock().unwrap();
-        if !jobs.is_empty() {
-            ui.label("Subtitle Jobs:");
-            ui.separator();
-            
-            // Calculate available height for the scroll area
-            // Reserve space for: status label, progress label, progress bar, and some padding
-            let reserved_height = 80.0; // Approximate space needed for bottom elements
-            let available_height = ui.available_height() - reserved_height;
-            let scroll_height = available_height.max(200.0); // Minimum height of 200px (previous default)
-            
-            egui::ScrollArea::vertical()
-                .max_height(scroll_height)
-                .show(ui, |ui| {
-                    // Set a fixed width to ensure consistent scroll bar positioning
-                    let available_width = ui.available_width();
-                    ui.set_width(available_width - 20.0); // Reserve space for scroll bar
-                    
-                    for job in jobs.iter() {
-                        let (status_text, status_color) = match &job.status {
-                            JobStatus::Pending => ("Pending".to_string(), Some(egui::Color32::from_rgb(241, 250, 140))), // yellow
-                            JobStatus::Running => ("Running".to_string(), Some(egui::Color32::from_rgb(189, 147, 249))), // lighter purple
-                            JobStatus::Success => ("Success".to_string(), Some(egui::Color32::from_rgb(80, 250, 123))), // green
-                            JobStatus::EmbeddedExists(msg) => (msg.clone(), Some(egui::Color32::from_rgb(255, 184, 108))), // orange
-                            JobStatus::Failed(err) => (format!("Failed: {}", err), Some(egui::Color32::from_rgb(255, 85, 85))), // red
-                        };
-                        // Video name and status on first line
-                        ui.horizontal(|ui| {
-                            let file_name = Utils::get_file_name(&job.video_path);
-                            ui.label(Utils::truncate_string(&file_name, 50));
-                            match status_color {
-                                Some(color) => ui.label(egui::RichText::new(format!(" - {}", status_text)).color(color)),
-                                None => ui.label(format!(" - {}", status_text)),
-                            };
-                        });
-                        
-                        // Subtitle path on second line (indented)
-                        for sub_path in &job.subtitle_paths {
-                            ui.horizontal(|ui| {
-                                ui.add_space(20.0); // Indent the subtitle path
-                                let path_str = sub_path.display().to_string();
-                                let hyperlink_resp = ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(format!("📄 {}", path_str))
-                                            .color(egui::Color32::from_rgb(248, 248, 242)) // white
-                                    )
-                                    .sense(egui::Sense::click())
-                                );
-                                if hyperlink_resp.hovered() {
-                                    let rect = hyperlink_resp.rect;
-                                    let painter = ui.painter();
-                                    painter.line_segment([
-                                        rect.left_bottom() + egui::vec2(2.0, -2.0),
-                                        rect.right_bottom() + egui::vec2(-2.0, -2.0)
-                                    ],
-                                    egui::Stroke::new(1.5, egui::Color32::from_rgb(139, 233, 253)) // cyan underline
-                                    );
-                                    ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::PointingHand);
-                                }
-                                if hyperlink_resp.clicked() {
-                                    debug!("User clicked subtitle path: {}", path_str);
-                                    // Open the folder containing the subtitle file
-                                    #[cfg(target_os = "windows")]
-                                    {
-                                        let _ = std::process::Command::new("explorer")
-                                            .arg("/select,")
-                                            .arg(sub_path)
-                                            .spawn();
-                                    }
-                                    #[cfg(target_os = "linux")]
-                                    {
-                                        let _ = std::process::Command::new("xdg-open")
-                                            .arg(sub_path.parent().unwrap_or_else(|| std::path::Path::new(".")))
-                                            .spawn();
-                                    }
-                                    #[cfg(target_os = "macos")]
-                                    {
-                                        let _ = std::process::Command::new("open")
-                                            .arg("-R")
-                                            .arg(sub_path)
-                                            .spawn();
-                                    }
-                                }
-                            });
-                        }
-                    }
-                });
+    fn render_download_jobs(&mut self, ui: &mut egui::Ui) {
+        // Update cached jobs if needed
+        self.update_cached_jobs();
+        
+        if self.cached_jobs.is_empty() {
+            return;
         }
+        
+        ui.label("Subtitle Jobs:");
+        ui.separator();
+        
+        // Calculate available height for the scroll area
+        // Reserve space for: status label, progress label, progress bar, and some padding
+        let reserved_height = 80.0; // Approximate space needed for bottom elements
+        let available_height = ui.available_height() - reserved_height;
+        let scroll_height = available_height.max(200.0); // Minimum height of 200px (previous default)
+        
+        egui::ScrollArea::vertical()
+            .max_height(scroll_height)
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                
+                for job in &self.cached_jobs {
+                    let (status_text, status_color) = match &job.status {
+                        JobStatus::Pending => ("Pending".to_string(), Some(egui::Color32::from_rgb(241, 250, 140))), // yellow
+                        JobStatus::Running => ("Running".to_string(), Some(egui::Color32::from_rgb(189, 147, 249))), // lighter purple
+                        JobStatus::Success => ("Success".to_string(), Some(egui::Color32::from_rgb(80, 250, 123))), // green
+                        JobStatus::EmbeddedExists(msg) => (msg.clone(), Some(egui::Color32::from_rgb(255, 184, 108))), // orange
+                        JobStatus::Failed(err) => (format!("Failed: {}", err), Some(egui::Color32::from_rgb(255, 85, 85))), // red
+                    };
+                    // Video name and status on first line
+                    ui.horizontal(|ui| {
+                        let file_name = Utils::get_file_name(&job.video_path);
+                        ui.label(Utils::truncate_string(&file_name, 50));
+                        match status_color {
+                            Some(color) => ui.label(egui::RichText::new(format!(" - {}", status_text)).color(color)),
+                            None => ui.label(format!(" - {}", status_text)),
+                        };
+                    });
+                    
+                    // Subtitle path on second line (indented) - simplified for performance
+                    for sub_path in &job.subtitle_paths {
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0); // Indent the subtitle path
+                            let path_str = sub_path.display().to_string();
+                            ui.label(format!("📄 {}", path_str));
+                        });
+                    }
+                }
+            });
     }
 
     /// Render progress bar
     fn render_progress_bar(&self, ui: &mut egui::Ui) {
+        // Count all jobs that are not Pending or Running as completed
+        let completed_count = self.cached_jobs.iter().filter(|j| {
+            !matches!(j.status, JobStatus::Pending | JobStatus::Running)
+        }).count();
+        let total = self.total_downloads;
         // Show progress bar only when downloads are active or complete
-        if self.is_downloading || (!self.downloading && self.total_downloads > 0) {
-            if self.total_downloads > 0 {
+        if self.is_downloading || (!self.downloading && total > 0) {
+            if total > 0 {
                 ui.add_space(10.0);
                 let progress_text = format!("Progress: {} / {} ({})", 
-                    self.downloads_completed, 
-                    self.total_downloads,
-                    Utils::format_progress(self.downloads_completed, self.total_downloads)
+                    completed_count, 
+                    total,
+                    Utils::format_progress(completed_count, total)
                 );
                 ui.label(progress_text);
             }
         }
         // Place the progress bar here, outside the ScrollArea. always fit the window
-        if (self.is_downloading || (!self.downloading && self.total_downloads > 0)) && self.total_downloads > 0 {
-            let progress = self.downloads_completed as f32 / self.total_downloads as f32;
+        if (self.is_downloading || (!self.downloading && total > 0)) && total > 0 {
+            let progress = completed_count as f32 / total as f32;
             let window_width = ui.ctx().screen_rect().width();
             let progress_bar = egui::ProgressBar::new(progress)
                 .show_percentage()
@@ -1603,6 +2122,31 @@ impl SubtitleDownloader {
                 .desired_width(window_width - 18.0);
             ui.add(progress_bar);
         }
+    }
+
+    fn poll_version_check(&mut self) {
+        if self.version_checked { return; }
+        let mut lock = VERSION_PTR.lock().unwrap();
+        if lock.2 {
+            self.latest_version = lock.0.clone();
+            self.version_check_error = lock.1.clone();
+            self.version_checked = true;
+        }
+    }
+
+    /// Compare two version strings (ignoring 'v' prefix). Returns true if current < latest.
+    fn is_outdated(current: &str, latest: &str) -> bool {
+        let parse = |s: &str| {
+            s.trim_start_matches('v')
+                .split('.').map(|x| x.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>()
+        };
+        let c = parse(current);
+        let l = parse(latest);
+        for (a, b) in c.iter().zip(l.iter()) {
+            if a < b { return true; }
+            if a > b { return false; }
+        }
+        c.len() < l.len() // e.g. 1.0 < 1.0.1
     }
 }
 
@@ -1615,8 +2159,13 @@ impl eframe::App for SubtitleDownloader {
         // Check download completion
         self.check_download_completion();
 
+        // Refresh installation status and auto-proceed
+        self.refresh_installation_status();
+
         // Handle installation states
         self.handle_installation_states();
+
+        self.poll_version_check();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.render_header(ui);
@@ -1627,6 +2176,7 @@ impl eframe::App for SubtitleDownloader {
             }
 
             self.render_python_status(ui);
+            self.render_pipx_status(ui);
             self.render_subliminal_status(ui);
             ui.separator();
 
@@ -1642,7 +2192,7 @@ impl eframe::App for SubtitleDownloader {
                 self.render_download_jobs(ui);
             } else {
                 // Show message when subliminal is not installed
-                ui.label("Please install Python and Subliminal above to start downloading subtitles.");
+                ui.label("Please install all dependencies before downloading subtitles.");
             }
 
             if !self.folder_path.is_empty() {
@@ -1668,10 +2218,34 @@ impl eframe::App for SubtitleDownloader {
             }
         }
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        // Reduce repaint frequency to improve scrolling performance
+        if self.downloading {
+            // More frequent updates during downloads
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        } else {
+            // Less frequent updates when idle
+            ctx.request_repaint_after(std::time::Duration::from_millis(1000));
+        }
+        // Reset pipx_copied after 1.5 seconds
+        if self.pipx_copied {
+            if let Some(t) = self.pipx_copy_time {
+                if t.elapsed().as_secs_f32() > 1.5 {
+                    self.pipx_copied = false;
+                    self.pipx_copy_time = None;
+                }
+            }
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Clean up background thread
+        if let Some(sender) = &self.background_check_sender {
+            let _ = sender.send((false, false)); // Send dummy data to wake up thread
+        }
+        if let Some(handle) = self.background_check_handle.take() {
+            let _ = handle.join();
+        }
+        
         info!("Application closed by user");
         info!("");
         info!("---------------------------------------------------------------");
@@ -1696,44 +2270,82 @@ fn initialize_app() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Load application icon from embedded resources
 fn load_app_icon() -> Option<egui::IconData> {
-    if let Ok(image) = image::load_from_memory(include_bytes!("../resources/rustitles_icon.ico")) {
-        let rgba = image.to_rgba8();
-        let size = [rgba.width() as u32, rgba.height() as u32];
-        Some(egui::IconData {
-            rgba: rgba.into_raw(),
-            width: size[0],
-            height: size[1],
-        })
-    } else {
-        warn!("Failed to load application icon");
-        None
+    #[cfg(windows)]
+    {
+        if let Ok(image) = image::load_from_memory(include_bytes!("../resources/rustitles_icon.ico")) {
+            let rgba = image.to_rgba8();
+            let size = [rgba.width() as u32, rgba.height() as u32];
+            Some(egui::IconData {
+                rgba: rgba.into_raw(),
+                width: size[0],
+                height: size[1],
+            })
+        } else {
+            warn!("Failed to load application icon");
+            None
+        }
+    }
+    
+    #[cfg(not(windows))]
+    {
+        // Try PNG first on Linux, then fallback to ICO
+        if let Ok(image) = image::load_from_memory(include_bytes!("../resources/rustitles_icon.png")) {
+            let rgba = image.to_rgba8();
+            let size = [rgba.width() as u32, rgba.height() as u32];
+            Some(egui::IconData {
+                rgba: rgba.into_raw(),
+                width: size[0],
+                height: size[1],
+            })
+        } else if let Ok(image) = image::load_from_memory(include_bytes!("../resources/rustitles_icon.ico")) {
+            let rgba = image.to_rgba8();
+            let size = [rgba.width() as u32, rgba.height() as u32];
+            Some(egui::IconData {
+                rgba: rgba.into_raw(),
+                width: size[0],
+                height: size[1],
+            })
+        } else {
+            warn!("Failed to load application icon");
+            None
+        }
     }
 }
 
 /// Calculate window position to center on the monitor under the cursor
 fn calculate_window_position(window_size: [f32; 2]) -> egui::Pos2 {
-    unsafe {
-        let mut point = POINT { x: 0, y: 0 };
-        if GetCursorPos(&mut point).is_ok() {
-            let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
-            let mut info = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            if GetMonitorInfoW(monitor, &mut info).as_bool() {
-                let work_left = info.rcWork.left;
-                let work_top = info.rcWork.top;
-                let work_width = (info.rcWork.right - info.rcWork.left) as f32;
-                let work_height = (info.rcWork.bottom - info.rcWork.top) as f32;
-                let x = work_left as f32 + (work_width - window_size[0]) / 2.0;
-                let y = work_top as f32 + (work_height - window_size[1]) / 2.0;
-                egui::Pos2::new(x, y)
+    #[cfg(windows)]
+    {
+        unsafe {
+            let mut point = POINT { x: 0, y: 0 };
+            if GetCursorPos(&mut point).is_ok() {
+                let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+                let mut info = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                if GetMonitorInfoW(monitor, &mut info).as_bool() {
+                    let work_left = info.rcWork.left;
+                    let work_top = info.rcWork.top;
+                    let work_width = (info.rcWork.right - info.rcWork.left) as f32;
+                    let work_height = (info.rcWork.bottom - info.rcWork.top) as f32;
+                    let x = work_left as f32 + (work_width - window_size[0]) / 2.0;
+                    let y = work_top as f32 + (work_height - window_size[1]) / 2.0;
+                    egui::Pos2::new(x, y)
+                } else {
+                    egui::Pos2::new(100.0, 100.0)
+                }
             } else {
                 egui::Pos2::new(100.0, 100.0)
             }
-        } else {
-            egui::Pos2::new(100.0, 100.0)
         }
+    }
+    
+    #[cfg(not(windows))]
+    {
+        // On Linux, just center the window on screen
+        // We'll use a simple approach that works with most window managers
+        egui::Pos2::new(100.0, 100.0)
     }
 }
 
@@ -1810,7 +2422,16 @@ enum AppError {
 
 }
 
+// =============================================================================
+// VERSION CONSTANT & VERSION CHECK STATE
+// =============================================================================
 
+
+
+use once_cell::sync::Lazy;
+static VERSION_PTR: Lazy<std::sync::Arc<std::sync::Mutex<(Option<String>, Option<String>, bool)>>> = Lazy::new(|| {
+    std::sync::Arc::new(std::sync::Mutex::new((None, None, false)))
+});
 
 fn main() {
     // Initialize the application
@@ -1862,20 +2483,6 @@ impl Utils {
             .to_string()
     }
 
-    /// Format a duration in a human-readable format
-    fn format_duration(duration: std::time::Duration) -> String {
-        let seconds = duration.as_secs();
-        if seconds < 60 {
-            format!("{}s", seconds)
-        } else if seconds < 3600 {
-            format!("{}m {}s", seconds / 60, seconds % 60)
-        } else {
-            let hours = seconds / 3600;
-            let minutes = (seconds % 3600) / 60;
-            format!("{}h {}m", hours, minutes)
-        }
-    }
-
     /// Truncate a string to a maximum length, adding ellipsis if needed
     fn truncate_string(s: &str, max_len: usize) -> String {
         if s.len() <= max_len {
@@ -1893,15 +2500,6 @@ impl Utils {
             .unwrap_or(false)
     }
 
-    /// Check if a path is a subtitle file based on its extension
-    fn is_subtitle_file(path: &Path) -> bool {
-        let subtitle_extensions = ["srt", "sub", "ssa", "ass", "vtt"];
-        path.extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| subtitle_extensions.iter().any(|&v| v.eq_ignore_ascii_case(ext)))
-            .unwrap_or(false)
-    }
-
     /// Create a progress percentage string
     fn format_progress(current: usize, total: usize) -> String {
         if total == 0 {
@@ -1910,11 +2508,6 @@ impl Utils {
             let percentage = (current as f32 / total as f32 * 100.0) as usize;
             format!("{}%", percentage)
         }
-    }
-
-    /// Get the current timestamp for logging
-    fn get_timestamp() -> String {
-        chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
     }
 }
 
@@ -1936,36 +2529,8 @@ impl Validation {
         path.exists() && path.is_dir()
     }
 
-    /// Validate that a file path exists and is a file
-    fn is_valid_file(path: &str) -> bool {
-        if path.is_empty() {
-            return false;
-        }
-        
-        let path = Path::new(path);
-        path.exists() && path.is_file()
-    }
-
     /// Validate concurrent downloads setting
     fn is_valid_concurrent_downloads(value: usize) -> bool {
         value > 0 && value <= MAX_CONCURRENT_DOWNLOADS
-    }
-
-    /// Validate language code format
-    fn is_valid_language_code(code: &str) -> bool {
-        !code.is_empty() && code.len() <= 10 && code.chars().all(|c| c.is_ascii_alphabetic() || c == '-')
-    }
-
-    /// Validate that at least one language is selected
-    fn has_selected_languages(languages: &[String]) -> bool {
-        !languages.is_empty() && languages.iter().all(|lang| Self::is_valid_language_code(lang))
-    }
-
-    /// Sanitize a file path for display
-    fn sanitize_path_for_display(path: &str) -> String {
-        path.replace('\\', "/")
-            .chars()
-            .filter(|&c| c.is_ascii_graphic() || c.is_ascii_whitespace())
-            .collect()
     }
 }
