@@ -79,3 +79,6 @@ If you have any issues, create an issue from the [Issues](https://github.com/fos
 
 If you'd like to support me, follow me on twitch:
 https://www.twitch.tv/fosterbarnes
+
+or if you're feeling generous drop a donation:
+https://coff.ee/fosterbarnes
