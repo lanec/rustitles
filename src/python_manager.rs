@@ -31,8 +31,8 @@ use windows::Win32::Foundation::{WPARAM, LPARAM};
 #[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{SendMessageTimeoutW, HWND_BROADCAST, WM_SETTINGCHANGE, SMTO_ABORTIFHUNG};
 
-// Linux-specific imports
-#[cfg(not(windows))]
+// Unix-specific imports (Linux and macOS)
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use dirs;
 
 /// Python and Subliminal installation and management utilities
@@ -41,8 +41,25 @@ pub struct PythonManager;
 impl PythonManager {
     /// Check if Python is installed and return its version
     pub fn get_version() -> Option<String> {
+        // On macOS, check Homebrew paths first, then system python3
+        #[cfg(target_os = "macos")]
+        let commands = vec![
+            "/opt/homebrew/bin/python3",  // Apple Silicon Homebrew
+            "/usr/local/bin/python3",     // Intel Mac Homebrew
+            "python3",
+            "python",
+            "py"
+        ];
+        
         // On Linux, check python3 first, then python, then py
-        for cmd in &["python3", "python", "py"] {
+        #[cfg(target_os = "linux")]
+        let commands = vec!["python3", "python", "py"];
+        
+        // On Windows
+        #[cfg(windows)]
+        let commands = vec!["python", "py", "python3"];
+        
+        for cmd in &commands {
             if let Ok(output) = Self::run_command_hidden(cmd, &["--version"], &std::collections::HashMap::new()) {
                 if output.status.success() {
                     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -108,7 +125,7 @@ impl PythonManager {
         false
     }
 
-    /// Install Subliminal via pipx (Linux) or pip (Windows)
+    /// Install Subliminal via pipx (Linux) or pip (Windows/macOS)
     pub fn install_subliminal() -> bool {
         #[cfg(windows)]
         {
@@ -128,7 +145,34 @@ impl PythonManager {
             false
         }
         
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            info!("Installing Subliminal via pip on macOS");
+            
+            // Try Homebrew Python paths first, then system python3
+            let python_commands = vec![
+                "/opt/homebrew/bin/python3",
+                "/usr/local/bin/python3",
+                "python3",
+                "python"
+            ];
+            
+            for cmd in &python_commands {
+                if let Ok(output) = Self::run_command_hidden(cmd, &["-m", "pip", "install", "--user", "subliminal"], &std::collections::HashMap::new()) {
+                    if output.status.success() {
+                        info!("Subliminal installed successfully using {}", cmd);
+                        return true;
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        warn!("Failed to install Subliminal using {}: {}", cmd, stderr);
+                    }
+                }
+            }
+            error!("Failed to install Subliminal with all Python commands");
+            false
+        }
+        
+        #[cfg(target_os = "linux")]
         {
             info!("Installing Subliminal via pipx on Linux");
             
@@ -253,7 +297,45 @@ impl PythonManager {
             Ok(())
         }
         
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, add Homebrew and Python user paths
+            let home_dir = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
+            let mut paths_to_add = Vec::new();
+            
+            // Homebrew paths
+            if std::path::Path::new("/opt/homebrew/bin").exists() {
+                paths_to_add.push("/opt/homebrew/bin".to_string());
+            }
+            if std::path::Path::new("/usr/local/bin").exists() {
+                paths_to_add.push("/usr/local/bin".to_string());
+            }
+            
+            // Python user scripts directory
+            let local_bin = home_dir.join("Library").join("Python");
+            if local_bin.exists() {
+                if let Ok(entries) = std::fs::read_dir(&local_bin) {
+                    for entry in entries.flatten() {
+                        let bin_path = entry.path().join("bin");
+                        if bin_path.exists() {
+                            paths_to_add.push(bin_path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+            
+            let current_path = env::var("PATH").unwrap_or_default();
+            for path in paths_to_add {
+                if !current_path.contains(&path) {
+                    let new_path = format!("{}:{}", path, current_path);
+                    env::set_var("PATH", new_path);
+                }
+            }
+            
+            Ok(())
+        }
+        
+        #[cfg(target_os = "linux")]
         {
             // On Linux, Python scripts are typically already in PATH via pip
             // Just ensure the user's local bin directory is in PATH
@@ -306,7 +388,48 @@ impl PythonManager {
             Ok(())
         }
         
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, add both Homebrew and user local paths
+            let home_dir = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
+            let mut paths_to_add = Vec::new();
+            
+            // Add Homebrew paths
+            let homebrew_paths = vec![
+                "/opt/homebrew/bin",      // Apple Silicon
+                "/usr/local/bin",         // Intel Mac
+            ];
+            
+            for path in homebrew_paths {
+                if std::path::Path::new(path).exists() {
+                    paths_to_add.push(path.to_string());
+                }
+            }
+            
+            // Add user local bin
+            let local_bin = home_dir.join("Library").join("Python");
+            if local_bin.exists() {
+                // Python on macOS installs to ~/Library/Python/3.x/bin
+                if let Ok(entries) = std::fs::read_dir(&local_bin) {
+                    for entry in entries.flatten() {
+                        let bin_path = entry.path().join("bin");
+                        if bin_path.exists() {
+                            paths_to_add.push(bin_path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+            
+            let current_path = env::var("PATH").unwrap_or_default();
+            let mut new_path_parts = paths_to_add;
+            new_path_parts.push(current_path);
+            let new_path = new_path_parts.join(":");
+            env::set_var("PATH", new_path);
+            
+            Ok(())
+        }
+        
+        #[cfg(target_os = "linux")]
         {
             // On Linux, reload environment from shell profile
             let home_dir = dirs::home_dir().ok_or_else(|| "Failed to get home directory".to_string())?;
@@ -357,11 +480,49 @@ impl PythonManager {
         Ok(status.success())
     }
 
-    /// Ensure Subliminal cache directory exists
+    /// Ensure Subliminal cache directory exists with proper permissions
     pub fn ensure_cache_dir() -> io::Result<PathBuf> {
         let cache_dir = env::temp_dir().join("subliminal_cache");
-        std::fs::create_dir_all(&cache_dir)?;
+        
+        // Create the directory if it doesn't exist
+        if !cache_dir.exists() {
+            std::fs::create_dir_all(&cache_dir)?;
+        }
+        
+        // On Windows, try to set proper permissions and clean up any corrupted cache files
+        #[cfg(windows)]
+        {
+            // Clean up any existing DBM cache files that might be corrupted
+            let cache_files = ["cache.dbm", "cache.dir", "cache.pag", "cache.db"];
+            for file_name in &cache_files {
+                let cache_file = cache_dir.join(file_name);
+                if cache_file.exists() {
+                    // Try to remove corrupted cache files
+                    let _ = std::fs::remove_file(&cache_file);
+                }
+            }
+        }
+        
         Ok(cache_dir)
+    }
+
+    /// Clean up corrupted cache files (call this when DBM errors persist)
+    pub fn cleanup_cache() -> io::Result<()> {
+        let cache_dir = env::temp_dir().join("subliminal_cache");
+        if cache_dir.exists() {
+            // Remove all cache files to force a fresh start
+            let cache_files = ["cache.dbm", "cache.dir", "cache.pag", "cache.db", "cache"];
+            for file_name in &cache_files {
+                let cache_file = cache_dir.join(file_name);
+                if cache_file.exists() {
+                    let _ = std::fs::remove_file(&cache_file);
+                }
+            }
+            // Also try to remove the directory and recreate it
+            let _ = std::fs::remove_dir_all(&cache_dir);
+            std::fs::create_dir_all(&cache_dir)?;
+        }
+        Ok(())
     }
 
     /// Run a command with hidden console window
@@ -379,10 +540,11 @@ impl PythonManager {
             command.creation_flags(0x08000000); // CREATE_NO_WINDOW
         }
         
-        // On Linux, we can't hide the window but we can redirect output
-        #[cfg(not(windows))]
+        // On Unix systems, we redirect output
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             // Set environment variables to suppress some output
+            #[cfg(target_os = "linux")]
             command.env("DEBIAN_FRONTEND", "noninteractive");
             command.env("PYTHONUNBUFFERED", "1");
         }

@@ -14,6 +14,7 @@ pub struct Settings {
     pub force_download: bool,
     pub overwrite_existing: bool,
     pub concurrent_downloads: usize,
+    pub ignore_local_extras: bool,
 }
 
 impl Default for Settings {
@@ -23,6 +24,7 @@ impl Default for Settings {
             force_download: false,
             overwrite_existing: false,
             concurrent_downloads: DEFAULT_CONCURRENT_DOWNLOADS,
+            ignore_local_extras: false,
         }
     }
 }
@@ -39,7 +41,18 @@ impl Settings {
             Ok(exe_dir.join("rustitles_settings.json"))
         }
         
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        {
+            // Use macOS Application Support directory
+            let home_dir = dirs::home_dir().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "Failed to get home directory")
+            })?;
+            let app_support = home_dir.join("Library/Application Support/rustitles");
+            std::fs::create_dir_all(&app_support)?;
+            Ok(app_support.join("settings.json"))
+        }
+        
+        #[cfg(target_os = "linux")]
         {
             // Use XDG config directory on Linux
             if let Ok(xdg_dirs) = xdg::BaseDirectories::new() {

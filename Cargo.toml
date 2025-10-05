@@ -1,8 +1,12 @@
 [package]
 name = "rustitles"
-version = "2.1.0"
+version = "2.1.3"
 edition = "2021"
 build = "build.rs"
+authors = ["fosterbarnes (original)", "lanec (macOS port)"]
+repository = "https://github.com/lanec/rustitles"
+license = "MIT"
+description = "Cross-platform subtitle downloader with GUI (Windows, Linux, macOS)"
 
 [dependencies]
 eframe = "0.27"
@@ -38,3 +42,12 @@ windows_subsystem = "windows"
 [[bin]]
 name = "rustitles"
 path = "src/main.rs"
+
+# macOS bundle configuration (for cargo-bundle or manual bundling)
+[package.metadata.bundle]
+name = "Rustitles"
+identifier = "com.lanec.rustitles"
+icon = ["resources/rustitles_icon.png"]
+category = "Utility"
+short_description = "Subtitle Downloader Tool"
+long_description = "Automatically download subtitles for your video files (fork with macOS support)"

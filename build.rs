@@ -69,9 +69,18 @@ fn fallback_to_winres(icon_path: &str) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn main() {
-    println!("cargo:warning=Build script is running on non-Windows");
+    println!("cargo:warning=Build script is running on Linux");
     // Linux build - no special configuration needed
     println!("cargo:rerun-if-changed=build.rs");
+}
+
+#[cfg(target_os = "macos")]
+fn main() {
+    println!("cargo:warning=Build script is running on macOS");
+    // macOS build configuration
+    println!("cargo:rustc-env=MACOSX_DEPLOYMENT_TARGET=10.13");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=resources/rustitles_icon.png");
 }

@@ -14,8 +14,39 @@ use crate::{
 impl SubtitleDownloader {
     /// Render the application header
     pub fn render_header(&self, ui: &mut egui::Ui) {
-        let title = format!("Rustitles v{} - Subtitle Downloader Tool ", APP_VERSION);
-        ui.heading(egui::RichText::new(title).color(egui::Color32::from_rgb(189, 147, 249)));
+        ui.horizontal(|ui| {
+            // Title on the left as a clickable link (links to this fork)
+            let title = format!("Rustitles v{} - Subtitle Downloader Tool", APP_VERSION);
+            let github_url = "https://github.com/lanec/rustitles";
+            let title_response = ui.hyperlink_to(
+                egui::RichText::new(title).color(egui::Color32::from_rgb(189, 147, 249)).heading(),
+                github_url
+            );
+            
+            // Set cursor icon on hover
+            if title_response.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            
+            // Add space to push donation link to the right
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Only show donation link when both Python and Subliminal are installed
+                // Link to original author's donation page
+                if self.is_python_installed() && self.is_subliminal_installed() {
+                    let donation_url = "https://buymeacoffee.com/fosterbarnes";
+                    let donation_text = "Support original author";
+                    let link_response = ui.hyperlink_to(
+                        egui::RichText::new(donation_text).color(egui::Color32::from_hex("#54b2fa").unwrap()),
+                        donation_url
+                    );
+                    
+                    // Set cursor icon on hover
+                    if link_response.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                    }
+                }
+            });
+        });
         ui.add_space(5.0);
     }
 
@@ -69,16 +100,20 @@ impl SubtitleDownloader {
                 // Start the install thread via app logic
                 self.start_python_install();
             }
-            #[cfg(not(windows))]
+            #[cfg(target_os = "linux")]
             {
                 ui.label("Please install Python 3 and python3-pip using your package manager, then restart Rustitles.");
+            }
+            #[cfg(target_os = "macos")]
+            {
+                ui.label("Please install Python 3. You can download it from python.org or use Homebrew: 'brew install python3'");
             }
         }
     }
 
     /// Render pipx installation status (Linux only)
     pub fn render_pipx_status(&mut self, _ui: &mut egui::Ui) {
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
         {
             if self.is_python_installed() {
                 if self.is_pipx_installed() {
@@ -93,7 +128,7 @@ impl SubtitleDownloader {
     /// Render Subliminal installation status
     pub fn render_subliminal_status(&mut self, ui: &mut egui::Ui) {
         if self.is_python_installed() {
-            #[cfg(not(windows))]
+            #[cfg(target_os = "linux")]
             {
                 // On Linux, only show install button if pipx is available
                 if !self.is_pipx_installed() {
@@ -137,11 +172,11 @@ impl SubtitleDownloader {
             if let Some(latest) = self.get_latest_version() {
                 if Self::is_outdated(APP_VERSION, latest) {
                     let exe_url = if cfg!(target_os = "windows") {
-                        format!("https://github.com/fosterbarnes/rustitles/releases/download/{}/rustitles.exe", latest)
+                        format!("https://github.com/lanec/rustitles/releases/tag/{}", latest)
                     } else if cfg!(target_os = "linux") {
-                        format!("https://github.com/fosterbarnes/rustitles/releases/download/{}/rustitles.AppImage", latest)
+                        format!("https://github.com/lanec/rustitles/releases/tag/{}", latest)
                     } else {
-                        format!("https://github.com/fosterbarnes/rustitles/releases/download/{}/rustitles", latest)
+                        format!("https://github.com/lanec/rustitles/releases/tag/{}", latest)
                     };
                     let link_text = format!("-> Rustitles {}", latest);
                     let link_rich = egui::RichText::new(link_text).color(egui::Color32::from_rgb(80, 160, 255));
@@ -168,12 +203,29 @@ impl SubtitleDownloader {
     /// Render language selection interface
     pub fn render_language_selection(&mut self, ui: &mut egui::Ui) {
         let language_list = vec![
-            ("en", "English"), ("fr", "French"), ("es", "Spanish"), ("de", "German"),
-            ("it", "Italian"), ("pt", "Portuguese"), ("nl", "Dutch"), ("pl", "Polish"),
-            ("ru", "Russian"), ("sv", "Swedish"), ("fi", "Finnish"), ("da", "Danish"),
-            ("no", "Norwegian"), ("cs", "Czech"), ("hu", "Hungarian"), ("ro", "Romanian"),
-            ("he", "Hebrew"), ("ar", "Arabic"), ("ja", "Japanese"), ("ko", "Korean"),
-            ("zh", "Chinese"), ("zh-cn", "Chinese (Simplified)"), ("zh-tw", "Chinese (Traditional)")
+            // English and variants at the top
+            ("en", "English"), ("en-gb", "English (UK)"), ("en-us", "English (US)"),
+            
+            // All other languages sorted alphabetically
+            ("af", "Afrikaans"), ("am", "Amharic"), ("ar", "Arabic"), ("az", "Azerbaijani"),
+            ("bg", "Bulgarian"), ("bn", "Bengali"), ("cs", "Czech"), ("da", "Danish"),
+            ("de", "German"), ("de-at", "German (Austria)"), ("de-ch", "German (Switzerland)"),
+            ("el", "Greek"), ("es", "Spanish"), ("es-es", "Spanish (Spain)"), ("es-mx", "Spanish (Mexico)"),
+            ("et", "Estonian"), ("fa", "Persian/Farsi"), ("fi", "Finnish"), ("fil", "Filipino/Tagalog"),
+            ("fr", "French"), ("fr-ca", "French (Canada)"), ("gu", "Gujarati"), ("he", "Hebrew"),
+            ("hi", "Hindi"), ("hr", "Croatian"), ("hu", "Hungarian"), ("id", "Indonesian"),
+            ("is", "Icelandic"), ("it", "Italian"), ("it-ch", "Italian (Switzerland)"), ("ja", "Japanese"),
+            ("ka", "Georgian"), ("km", "Khmer"), ("kn", "Kannada"), ("ko", "Korean"),
+            ("ku", "Kurdish"), ("lo", "Lao"), ("lt", "Lithuanian"), ("lv", "Latvian"),
+            ("ml", "Malayalam"), ("mn", "Mongolian"), ("ms", "Malay"), ("mt", "Maltese"),
+            ("my", "Burmese"), ("nl", "Dutch"), ("nl-be", "Dutch (Belgium)"), ("no", "Norwegian"),
+            ("or", "Odia"), ("pa", "Punjabi"), ("pl", "Polish"), ("pt", "Portuguese"),
+            ("pt-br", "Portuguese (Brazil)"), ("pt-pt", "Portuguese (Portugal)"), ("ro", "Romanian"),
+            ("ru", "Russian"), ("sk", "Slovak"), ("sl", "Slovenian"), ("sv", "Swedish"),
+            ("sw", "Swahili"), ("ta", "Tamil"), ("te", "Telugu"), ("th", "Thai"),
+            ("tr", "Turkish"), ("uk", "Ukrainian"), ("ur", "Urdu"), ("vi", "Vietnamese"),
+            ("xh", "Xhosa"), ("zh", "Chinese"), ("zh-cn", "Chinese (Simplified)"), ("zh-tw", "Chinese (Traditional)"),
+            ("zu", "Zulu")
         ];
 
         ui.horizontal(|ui| {
@@ -211,6 +263,22 @@ impl SubtitleDownloader {
                     self.scan_folder();
                 }
             }
+            
+            let ignore_local_extras = self.get_ignore_local_extras_mut();
+            let ignore_extras_checkbox_response = ui.checkbox(ignore_local_extras, "Ignore Extra Folders for Plex")
+                .on_hover_ui(|ui| {
+                    ui.set_width(300.0);
+                    ui.label("Ignores 'Behind The Scenes', 'Deleted Scenes', 'Featurettes', 'Interviews', 'Scenes', 'Shorts', 'Trailers' and 'Other' folders");
+                });
+            if ignore_extras_checkbox_response.changed() {
+                info!("(Ignore Local Extras) changed to: {}", *ignore_local_extras);
+                self.set_keep_dropdown_open(false); // Close dropdown when checkbox is clicked
+                self.save_current_settings(); // Save settings when changed
+                // Re-scan for missing subtitles when ignore extras option changes
+                if !self.get_folder_path().is_empty() {
+                    self.scan_folder();
+                }
+            }
         });
         
         // Simple popup that shows when button is clicked
@@ -226,7 +294,8 @@ impl SubtitleDownloader {
                         for (code, name) in &language_list {
                             let selected_languages = self.get_selected_languages_mut();
                             let mut selected = selected_languages.contains(&code.to_string());
-                            if ui.checkbox(&mut selected, *name).changed() {
+                            let display_text = format!("{} [{}]", name, code);
+                            if ui.checkbox(&mut selected, display_text).changed() {
                                 if selected {
                                     selected_languages.push(code.to_string());
                                     debug!("Language selected: {}", code);
@@ -318,6 +387,14 @@ impl SubtitleDownloader {
                     ui.label(format!("Overwriting {} subtitles", missing_count));
                 } else {
                     ui.label(format!("Missing subtitles: {}", missing_count));
+                }
+                
+                // Show ignored extra folders count if the feature is enabled and folders were ignored
+                if self.get_ignore_local_extras() && self.get_ignored_extra_folders() > 0 {
+                    ui.add_space(5.0);
+                    ui.label("-");
+                    ui.add_space(5.0);
+                    ui.label(format!("Ignoring {} extra folders", self.get_ignored_extra_folders()));
                 }
             });
         }
@@ -595,10 +672,16 @@ impl eframe::App for SubtitleDownloader {
         // When scan finishes, start downloads automatically
         if self.scanning {
             if let Some(rx) = &self.scan_done_receiver {
-                if rx.try_recv().is_ok() {
+                if let Ok(ignored_count) = rx.try_recv() {
                     self.scanning = false;
                     self.status = "Scan completed.".to_string();
                     self.scan_done_receiver = None;
+                    
+                    // Update the ignored extra folders count
+                    self.ignored_extra_folders = ignored_count;
+                    if ignored_count > 0 {
+                        info!("Scan completed with {} extra folders ignored", ignored_count);
+                    }
 
                     // Start downloads automatically after scan
                     info!("Scan completed, starting downloads automatically");
@@ -633,10 +716,28 @@ impl eframe::App for SubtitleDownloader {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         // Clean up background thread
         if let Some(sender) = &self.background_check_sender {
-            let _ = sender.send((false, false)); // Send dummy data to wake up thread
+            let _ = sender.send((false, false)); // Send shutdown signal to wake up thread
         }
+        
+        // Give the background thread a moment to exit gracefully
         if let Some(handle) = self.background_check_handle.take() {
-            let _ = handle.join();
+            // Use a timeout mechanism to avoid hanging indefinitely
+            let (tx, rx) = std::sync::mpsc::channel();
+            let handle_clone = handle;
+            std::thread::spawn(move || {
+                let _ = handle_clone.join();
+                let _ = tx.send(());
+            });
+            
+            // Wait up to 2 seconds for the thread to finish
+            match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                Ok(_) => {
+                    info!("Background thread exited gracefully");
+                }
+                Err(_) => {
+                    warn!("Background thread did not exit within timeout, continuing with shutdown");
+                }
+            }
         }
         
         info!("Application closed by user");

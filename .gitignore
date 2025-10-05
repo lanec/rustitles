@@ -7,3 +7,9 @@ appimagetool-x86_64.AppImage
 linuxdeploy-x86_64.AppImage
 AppImageTool
 buildForLinux.sh
+*.DS_Store
+.DS_Store
+
+
+#Ignore windsurf AI rules
+.windsurfrules
