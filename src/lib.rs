@@ -12,6 +12,7 @@ pub mod subtitle_utils;
 pub mod app;
 pub mod gui;
 pub mod helper_functions;
+pub mod plex;
 
 // Re-export commonly used items
 pub use config::*;

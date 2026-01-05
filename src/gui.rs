@@ -632,6 +632,9 @@ impl eframe::App for SubtitleDownloader {
         self.handle_installation_states();
 
         self.poll_version_check();
+        
+        // Poll for Plex activity updates
+        self.poll_plex_activity();
 
         egui::CentralPanel::default().show(ctx, |ui| {
             self.render_header(ui);
@@ -641,32 +644,263 @@ impl eframe::App for SubtitleDownloader {
                 return;
             }
 
-            self.render_python_status(ui);
-            self.render_pipx_status(ui);
-            self.render_subliminal_status(ui);
-            ui.separator();
+            // Wrap main content in a scroll area
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                self.render_python_status(ui);
+                self.render_pipx_status(ui);
+                self.render_subliminal_status(ui);
+                ui.separator();
 
-            // Only show language selection and folder selection after subliminal is installed
-            if self.subliminal_installed {
-                self.render_language_selection(ui);
-                ui.separator();
-                self.render_concurrent_downloads(ui);
-                ui.separator();
-                self.render_folder_selection(ui);
-                ui.separator();
-                self.render_scan_results(ui);
-                self.render_download_jobs(ui);
-            } else {
-                // Show message when subliminal is not installed
-                ui.label("Please install all dependencies before downloading subtitles.");
-            }
+                // Only show language selection and folder selection after subliminal is installed
+                if self.subliminal_installed {
+                    self.render_language_selection(ui);
+                    ui.separator();
+                    self.render_concurrent_downloads(ui);
+                    ui.separator();
+                    self.render_folder_selection(ui);
+                    ui.separator();
+                    self.render_scan_results(ui);
+                    self.render_download_jobs(ui);
+                    
+                    // Plex Integration Section
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(5.0);
+                    
+                    ui.horizontal(|ui| {
+                        ui.heading("Plex Integration");
+                        
+                        // Show quick status indicator
+                        if self.plex_config.enabled {
+                            if self.plex_service_running {
+                                ui.label(egui::RichText::new("● Active").color(egui::Color32::from_rgb(80, 250, 123)));
+                            } else {
+                                ui.label(egui::RichText::new("○ Inactive").color(egui::Color32::GRAY));
+                            }
+                        }
+                        
+                        let btn_text = if self.show_plex_settings { "▼ Settings" } else { "▶ Settings" };
+                        if ui.button(btn_text).clicked() {
+                            self.show_plex_settings = !self.show_plex_settings;
+                        }
+                    });
+                    
+                    // Always show status dashboard when Plex is enabled
+                    if self.plex_config.enabled {
+                        ui.add_space(5.0);
+                        
+                        // Status dashboard
+                        egui::Frame::none()
+                            .fill(egui::Color32::from_rgb(40, 42, 54))
+                            .rounding(5.0)
+                            .inner_margin(10.0)
+                            .show(ui, |ui| {
+                                // Service status row
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Service:").strong());
+                                    if self.plex_service_running {
+                                        ui.label(egui::RichText::new("● Running").color(egui::Color32::from_rgb(80, 250, 123)));
+                                        ui.label(egui::RichText::new(format!("on port {}", self.plex_config.webhook_port)).small().color(egui::Color32::GRAY));
+                                        if ui.small_button("Stop").clicked() {
+                                            self.stop_plex_service();
+                                        }
+                                    } else {
+                                        ui.label(egui::RichText::new("○ Stopped").color(egui::Color32::GRAY));
+                                        if ui.small_button("Start").clicked() {
+                                            self.start_plex_service();
+                                        }
+                                    }
+                                    
+                                    ui.add_space(20.0);
+                                    
+                                    // Scan Library button - works on existing content
+                                    if ui.button("🔍 Scan Library").clicked() {
+                                        self.scan_plex_library();
+                                    }
+                                });
+                                
+                                // Language row
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Language:").strong());
+                                    if self.selected_languages.is_empty() {
+                                        ui.label(egui::RichText::new("None selected!").color(egui::Color32::from_rgb(255, 85, 85)));
+                                    } else {
+                                        ui.label(self.selected_languages.join(", "));
+                                    }
+                                });
+                                
+                                ui.add_space(5.0);
+                                ui.separator();
+                                ui.add_space(5.0);
+                                
+                                // Activity stats
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("Activity:").strong());
+                                    
+                                    // Discovered
+                                    ui.label(format!("📥 {} discovered", self.plex_items_discovered));
+                                    ui.add_space(10.0);
+                                    
+                                    // Success
+                                    ui.label(egui::RichText::new(format!("✓ {} success", self.plex_items_success))
+                                        .color(egui::Color32::from_rgb(80, 250, 123)));
+                                    ui.add_space(10.0);
+                                    
+                                    // Failed
+                                    if self.plex_items_failed > 0 {
+                                        ui.label(egui::RichText::new(format!("✗ {} failed", self.plex_items_failed))
+                                            .color(egui::Color32::from_rgb(255, 85, 85)));
+                                    } else {
+                                        ui.label(egui::RichText::new(format!("✗ {} failed", self.plex_items_failed))
+                                            .color(egui::Color32::GRAY));
+                                    }
+                                });
+                                
+                                // Recent activity
+                                if !self.plex_recent_activity.is_empty() {
+                                    ui.add_space(5.0);
+                                    ui.separator();
+                                    ui.add_space(5.0);
+                                    
+                                    ui.label(egui::RichText::new("Recent Activity:").strong());
+                                    
+                                    egui::ScrollArea::vertical().max_height(150.0).show(ui, |ui| {
+                                        for item in self.plex_recent_activity.iter().rev().take(10) {
+                                            ui.horizontal(|ui| {
+                                                // Status icon
+                                                let (icon, color) = match &item.status {
+                                                    crate::data_structures::PlexActivityStatus::Discovered => ("📥", egui::Color32::WHITE),
+                                                    crate::data_structures::PlexActivityStatus::Processing => ("⏳", egui::Color32::YELLOW),
+                                                    crate::data_structures::PlexActivityStatus::Success => ("✓", egui::Color32::from_rgb(80, 250, 123)),
+                                                    crate::data_structures::PlexActivityStatus::Failed(_) => ("✗", egui::Color32::from_rgb(255, 85, 85)),
+                                                    crate::data_structures::PlexActivityStatus::Skipped(_) => ("⊘", egui::Color32::GRAY),
+                                                };
+                                                ui.label(egui::RichText::new(icon).color(color));
+                                                
+                                                // Title
+                                                ui.label(&item.title);
+                                                
+                                                // Language
+                                                ui.label(egui::RichText::new(format!("[{}]", item.language)).small().color(egui::Color32::GRAY));
+                                                
+                                                // Retry button for failed items
+                                                if let crate::data_structures::PlexActivityStatus::Failed(ref err) = item.status {
+                                                    if let Some(ref path) = item.file_path {
+                                                        if ui.small_button("Retry").clicked() {
+                                                            // Add to download queue for manual retry
+                                                            let path_buf = std::path::PathBuf::from(path);
+                                                            let mut jobs = self.download_jobs.lock().unwrap();
+                                                            jobs.push(crate::data_structures::DownloadJob {
+                                                                video_path: path_buf,
+                                                                status: crate::data_structures::JobStatus::Pending,
+                                                                subtitle_paths: Vec::new(),
+                                                            });
+                                                            self.total_downloads += 1;
+                                                        }
+                                                    }
+                                                    ui.label(egui::RichText::new(err).small().color(egui::Color32::from_rgb(255, 85, 85)));
+                                                }
+                                            });
+                                        }
+                                    });
+                                } else if self.plex_service_running {
+                                    ui.add_space(5.0);
+                                    ui.label(egui::RichText::new("Waiting for Plex webhooks... Add media to your library to trigger subtitle downloads.")
+                                        .small().color(egui::Color32::GRAY));
+                                }
+                            });
+                        
+                        // Clear activity button
+                        if self.plex_items_discovered > 0 {
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Clear Activity").clicked() {
+                                    self.plex_items_discovered = 0;
+                                    self.plex_items_processed = 0;
+                                    self.plex_items_success = 0;
+                                    self.plex_items_failed = 0;
+                                    self.plex_recent_activity.clear();
+                                }
+                            });
+                        }
+                    }
+                    
+                    if self.show_plex_settings {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.label(egui::RichText::new("Plex Settings").strong());
+                        ui.add_space(5.0);
+                        
+                        crate::plex::ui::render_plex_settings(
+                            ui,
+                            &mut self.plex_config,
+                            self.plex_testing_connection,
+                            &self.plex_connection_status,
+                        );
+                        
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.label(egui::RichText::new("Startup Options").strong());
+                        ui.add_space(5.0);
+                        
+                        // Start with Windows checkbox
+                        #[cfg(windows)]
+                        {
+                            let mut start_with_windows = self.start_with_windows;
+                            if ui.checkbox(&mut start_with_windows, "Start with Windows").changed() {
+                                self.start_with_windows = start_with_windows;
+                                let exe_path = std::env::current_exe()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_else(|_| "rustitles.exe".to_string());
+                                if let Ok(auto) = auto_launch::AutoLaunchBuilder::new()
+                                    .set_app_name("Rustitles")
+                                    .set_app_path(&exe_path)
+                                    .set_use_launch_agent(false)
+                                    .build()
+                                {
+                                    if start_with_windows {
+                                        if let Err(e) = auto.enable() {
+                                            log::error!("Failed to enable startup: {}", e);
+                                        }
+                                    } else {
+                                        if let Err(e) = auto.disable() {
+                                            log::error!("Failed to disable startup: {}", e);
+                                        }
+                                    }
+                                }
+                            }
+                            ui.label(egui::RichText::new("Automatically start Rustitles when Windows starts").small().color(egui::Color32::GRAY));
+                        }
+                        
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            if ui.button("Test Connection").clicked() && !self.plex_testing_connection {
+                                self.test_plex_connection();
+                            }
+                            if ui.button("Save Settings").clicked() {
+                                self.save_current_settings();
+                            }
+                        });
+                    }
+                    
+                    // Show failures section if Plex is enabled and has failures
+                    if self.plex_config.enabled && self.plex_items_failed > 0 {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.heading("Failed Downloads");
+                        crate::plex::ui::render_failures_tab(ui, &mut self.plex_failures_state);
+                    }
+                } else {
+                    // Show message when subliminal is not installed
+                    ui.label("Please install all dependencies before downloading subtitles.");
+                }
 
-            if !self.folder_path.is_empty() {
-                ui.separator();
-            }
-
-            self.render_status(ui);
-            self.render_progress_bar(ui);
+                if !self.folder_path.is_empty() {
+                    ui.separator();
+                }
+                
+                self.render_status(ui);
+                self.render_progress_bar(ui);
+            });
         });
 
         // When scan finishes, start downloads automatically

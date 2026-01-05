@@ -13,6 +13,8 @@ mod subtitle_utils;
 mod app;
 mod gui;
 mod helper_functions;
+mod plex;
+pub mod tray;
 
 // Re-export commonly used items
 pub use config::*;
@@ -212,6 +214,10 @@ fn main() {
         eprintln!("Failed to initialize application: {}", e);
         return;
     }
+    
+    // Create system tray icon
+    let _tray = tray::create_tray();
+    info!("System tray icon created");
     
     // Load application icon
     let icon_data = load_app_icon();

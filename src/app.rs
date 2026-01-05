@@ -195,6 +195,20 @@ impl Default for SubtitleDownloader {
             latest_version: None,
             version_check_error: None,
             version_checked: false,
+            plex_config: settings.plex,
+            plex_service_running: false,
+            plex_connection_status: None,
+            plex_testing_connection: false,
+            plex_failures_state: Default::default(),
+            show_plex_settings: false,
+            plex_items_discovered: 0,
+            plex_items_processed: 0,
+            plex_items_success: 0,
+            plex_items_failed: 0,
+            plex_recent_activity: Vec::new(),
+            minimize_to_tray: true,
+            start_with_windows: false, // Will be checked via settings
+            should_exit: false,
         };
         // Start version check in background (use static VERSION_PTR)
         let version_ptr_clone = VERSION_PTR.clone();
@@ -225,6 +239,7 @@ impl Default for SubtitleDownloader {
             *lock = (latest, err, checked);
         });
         // Poll for version check result in update()
+
         downloader
     }
 }
@@ -238,6 +253,7 @@ impl SubtitleDownloader {
             overwrite_existing: self.overwrite_existing,
             ignore_local_extras: self.ignore_local_extras,
             concurrent_downloads: self.concurrent_downloads,
+            plex: self.plex_config.clone(),
         };
         
         if let Err(e) = settings.save() {
@@ -245,6 +261,248 @@ impl SubtitleDownloader {
         } else {
             debug!("Settings saved successfully");
         }
+    }
+    
+    /// Test connection to Plex server
+    pub fn test_plex_connection(&mut self) {
+        if self.plex_testing_connection {
+            return;
+        }
+        
+        self.plex_testing_connection = true;
+        self.plex_connection_status = None;
+        
+        let config = self.plex_config.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let result = rt.block_on(async {
+                let client = crate::plex::PlexClient::from_config(&config);
+                client.test_connection().await
+            });
+            
+            let _ = tx.send(result.map_err(|e| e.to_string()));
+        });
+        
+        // Store receiver to check result later
+        // We'll check this in the update loop
+        std::thread::spawn(move || {
+            if let Ok(result) = rx.recv() {
+                // Result will be picked up by polling
+                drop(result);
+            }
+        });
+    }
+    
+    /// Start the Plex webhook service
+    pub fn start_plex_service(&mut self) {
+        if self.plex_service_running {
+            return;
+        }
+        
+        // Sync languages from main app to plex config
+        self.plex_config.languages = self.selected_languages.clone();
+        
+        info!("Starting Plex webhook service on port {} with languages: {:?}", 
+              self.plex_config.webhook_port, self.plex_config.languages);
+        
+        let config = self.plex_config.clone();
+        
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                if let Err(e) = crate::plex::webhook::start_webhook_server(config).await {
+                    log::error!("Webhook server error: {}", e);
+                }
+            });
+        });
+        
+        self.plex_service_running = true;
+    }
+    
+    /// Stop the Plex webhook service  
+    pub fn stop_plex_service(&mut self) {
+        if !self.plex_service_running {
+            return;
+        }
+        
+        info!("Stopping Plex webhook service");
+        // Note: Graceful shutdown would require storing the server handle
+        // For now, the service will stop when the app exits
+        self.plex_service_running = false;
+    }
+    
+    /// Poll for Plex activity updates from the webhook handler
+    pub fn poll_plex_activity(&mut self) {
+        use crate::data_structures::{PlexActivityItem, PlexActivityStatus};
+        
+        let updates = crate::plex::drain_activity();
+        
+        for update in updates {
+            // Convert the update status to activity status
+            let status = match update.status {
+                crate::plex::PlexActivityUpdateStatus::Discovered => {
+                    self.plex_items_discovered += 1;
+                    PlexActivityStatus::Discovered
+                }
+                crate::plex::PlexActivityUpdateStatus::Processing => {
+                    self.plex_items_processed += 1;
+                    PlexActivityStatus::Processing
+                }
+                crate::plex::PlexActivityUpdateStatus::Success => {
+                    self.plex_items_success += 1;
+                    PlexActivityStatus::Success
+                }
+                crate::plex::PlexActivityUpdateStatus::Failed(err) => {
+                    self.plex_items_failed += 1;
+                    PlexActivityStatus::Failed(err)
+                }
+                crate::plex::PlexActivityUpdateStatus::Skipped(reason) => {
+                    PlexActivityStatus::Skipped(reason)
+                }
+            };
+            
+            // Add to recent activity list
+            self.plex_recent_activity.push(PlexActivityItem {
+                title: update.title,
+                media_type: update.media_type,
+                status,
+                language: update.language,
+                timestamp: std::time::Instant::now(),
+                file_path: update.file_path,
+            });
+            
+            // Keep activity list bounded
+            if self.plex_recent_activity.len() > 50 {
+                self.plex_recent_activity.remove(0);
+            }
+        }
+    }
+
+    /// Scan entire Plex library for items missing subtitles
+    pub fn scan_plex_library(&mut self) {
+        if !self.plex_config.enabled {
+            return;
+        }
+        
+        // Sync languages
+        self.plex_config.languages = self.selected_languages.clone();
+        
+        info!("Starting Plex library scan for subtitles in languages: {:?}", self.plex_config.languages);
+        
+        let config = self.plex_config.clone();
+        
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async {
+                let client = crate::plex::PlexClient::from_config(&config);
+                
+                // Get all libraries
+                match client.get_libraries().await {
+                    Ok(libraries) => {
+                        log::info!("Found {} Plex libraries", libraries.len());
+                        
+                        for library in libraries {
+                            // Only process movie and show libraries
+                            if library.section_type != "movie" && library.section_type != "show" {
+                                log::debug!("Skipping library {} (type: {})", library.title, library.section_type);
+                                continue;
+                            }
+                            
+                            log::info!("Scanning library: {} ({})", library.title, library.section_type);
+                            
+                            match client.get_library_items(&library.key).await {
+                                Ok(items) => {
+                                    log::info!("Found {} items in {}", items.len(), library.title);
+                                    
+                                    for item in items {
+                                        // For TV shows, we need to get episodes
+                                        if item.media_type == "show" {
+                                            // Get seasons/episodes would require additional API calls
+                                            // For now, skip shows - would need to implement nested fetching
+                                            log::debug!("Skipping show: {} (episode scanning not yet implemented)", item.title);
+                                            continue;
+                                        }
+                                        
+                                        // Push discovered activity
+                                        crate::plex::push_activity(crate::plex::PlexActivityUpdate {
+                                            title: item.display_name(),
+                                            media_type: item.media_type.clone(),
+                                            status: crate::plex::PlexActivityUpdateStatus::Discovered,
+                                            language: config.languages.first().cloned().unwrap_or_else(|| "eng".to_string()),
+                                            file_path: item.file_path().map(|s| s.to_string()),
+                                        });
+                                        
+                                        // Check if subtitles are missing
+                                        let missing = crate::plex::subliminal::get_missing_languages(
+                                            &item,
+                                            &config.languages,
+                                        );
+                                        
+                                        if missing.is_empty() {
+                                            crate::plex::push_activity(crate::plex::PlexActivityUpdate {
+                                                title: item.display_name(),
+                                                media_type: item.media_type.clone(),
+                                                status: crate::plex::PlexActivityUpdateStatus::Skipped("Subtitles exist".to_string()),
+                                                language: config.languages.first().cloned().unwrap_or_else(|| "eng".to_string()),
+                                                file_path: item.file_path().map(|s| s.to_string()),
+                                            });
+                                            continue;
+                                        }
+                                        
+                                        // Download subtitles for each missing language
+                                        for language in &missing {
+                                            crate::plex::push_activity(crate::plex::PlexActivityUpdate {
+                                                title: item.display_name(),
+                                                media_type: item.media_type.clone(),
+                                                status: crate::plex::PlexActivityUpdateStatus::Processing,
+                                                language: language.clone(),
+                                                file_path: item.file_path().map(|s| s.to_string()),
+                                            });
+                                            
+                                            let result = crate::plex::subliminal::download_subtitle_for_item(
+                                                &item,
+                                                language,
+                                                &config,
+                                            );
+                                            
+                                            if result.success {
+                                                crate::plex::push_activity(crate::plex::PlexActivityUpdate {
+                                                    title: item.display_name(),
+                                                    media_type: item.media_type.clone(),
+                                                    status: crate::plex::PlexActivityUpdateStatus::Success,
+                                                    language: language.clone(),
+                                                    file_path: item.file_path().map(|s| s.to_string()),
+                                                });
+                                            } else {
+                                                crate::plex::push_activity(crate::plex::PlexActivityUpdate {
+                                                    title: item.display_name(),
+                                                    media_type: item.media_type.clone(),
+                                                    status: crate::plex::PlexActivityUpdateStatus::Failed(
+                                                        result.error.unwrap_or_else(|| "Unknown error".to_string())
+                                                    ),
+                                                    language: language.clone(),
+                                                    file_path: item.file_path().map(|s| s.to_string()),
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to get items from library {}: {}", library.title, e);
+                                }
+                            }
+                        }
+                        
+                        log::info!("Plex library scan complete");
+                    }
+                    Err(e) => {
+                        log::error!("Failed to get Plex libraries: {}", e);
+                    }
+                }
+            });
+        });
     }
 
     /// Scan the selected folder for video files and update the missing subtitles list

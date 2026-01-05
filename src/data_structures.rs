@@ -91,4 +91,44 @@ pub struct SubtitleDownloader {
     pub latest_version: Option<String>,
     pub version_check_error: Option<String>,
     pub version_checked: bool,
-} 
+    
+    // Plex integration state
+    pub plex_config: crate::plex::PlexServiceConfig,
+    pub plex_service_running: bool,
+    pub plex_connection_status: Option<Result<String, String>>,
+    pub plex_testing_connection: bool,
+    pub plex_failures_state: crate::plex::ui::PlexFailuresState,
+    pub show_plex_settings: bool,
+    
+    // Plex activity tracking
+    pub plex_items_discovered: usize,
+    pub plex_items_processed: usize,
+    pub plex_items_success: usize,
+    pub plex_items_failed: usize,
+    pub plex_recent_activity: Vec<PlexActivityItem>,
+    
+    // System tray settings
+    pub minimize_to_tray: bool,
+    pub start_with_windows: bool,
+    pub should_exit: bool,
+}
+
+/// Tracks a single Plex webhook activity item
+#[derive(Clone, Debug)]
+pub struct PlexActivityItem {
+    pub title: String,
+    pub media_type: String,
+    pub status: PlexActivityStatus,
+    pub language: String,
+    pub timestamp: std::time::Instant,
+    pub file_path: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlexActivityStatus {
+    Discovered,
+    Processing,
+    Success,
+    Failed(String),
+    Skipped(String),
+}
