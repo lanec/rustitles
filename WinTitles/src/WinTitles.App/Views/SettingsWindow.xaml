@@ -1,0 +1,274 @@
+<Window x:Class="WinTitles.App.Views.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Settings - WinTitles" Height="500" Width="500"
+        WindowStartupLocation="CenterOwner"
+        Background="#282A36"
+        ResizeMode="NoResize">
+    
+    <Window.Resources>
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#F8F8F2"/>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#44475A"/>
+            <Setter Property="Foreground" Value="#F8F8F2"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="8,6"/>
+        </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="#F8F8F2"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#44475A"/>
+            <Setter Property="Foreground" Value="#F8F8F2"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="15,8"/>
+            <Setter Property="Cursor" Value="Hand"/>
+        </Style>
+        <ControlTemplate x:Key="DarkComboBoxTemplate" TargetType="ComboBox">
+            <Grid>
+                <ToggleButton x:Name="ToggleButton" 
+                              Background="#44475A" 
+                              BorderThickness="0"
+                              Focusable="False"
+                              IsChecked="{Binding Path=IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                              ClickMode="Press">
+                    <ToggleButton.Template>
+                        <ControlTemplate TargetType="ToggleButton">
+                            <Border Background="#44475A" BorderThickness="0" CornerRadius="3">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition/>
+                                        <ColumnDefinition Width="20"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ContentPresenter Grid.Column="0"/>
+                                    <Path Grid.Column="1" Data="M0,0 L4,4 L8,0" Stroke="White" StrokeThickness="1.5" 
+                                          HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Grid>
+                            </Border>
+                        </ControlTemplate>
+                    </ToggleButton.Template>
+                </ToggleButton>
+                <ContentPresenter x:Name="ContentSite"
+                                  IsHitTestVisible="False"
+                                  Content="{TemplateBinding SelectionBoxItem}"
+                                  ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                  ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                  Margin="10,6,25,6"
+                                  VerticalAlignment="Center"
+                                  HorizontalAlignment="Left">
+                    <ContentPresenter.Resources>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Foreground" Value="White"/>
+                        </Style>
+                    </ContentPresenter.Resources>
+                </ContentPresenter>
+                <TextBox x:Name="PART_EditableTextBox"
+                         Style="{x:Null}"
+                         Background="Transparent"
+                         Foreground="White"
+                         CaretBrush="White"
+                         IsReadOnly="{TemplateBinding IsReadOnly}"
+                         Visibility="Hidden"
+                         Margin="10,6,25,6"/>
+                <Popup x:Name="Popup"
+                       Placement="Bottom"
+                       IsOpen="{TemplateBinding IsDropDownOpen}"
+                       AllowsTransparency="True"
+                       Focusable="False"
+                       PopupAnimation="Slide">
+                    <Grid x:Name="DropDown"
+                          MinWidth="{TemplateBinding ActualWidth}"
+                          MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                        <Border x:Name="DropDownBorder" Background="#44475A" BorderThickness="0" CornerRadius="3"/>
+                        <ScrollViewer Margin="4" SnapsToDevicePixels="True">
+                            <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Contained"/>
+                        </ScrollViewer>
+                    </Grid>
+                </Popup>
+            </Grid>
+        </ControlTemplate>
+        
+        <Style x:Key="DarkComboBoxStyle" TargetType="ComboBox">
+            <Setter Property="Template" Value="{StaticResource DarkComboBoxTemplate}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Background" Value="#44475A"/>
+            <Setter Property="ItemContainerStyle">
+                <Setter.Value>
+                    <Style TargetType="ComboBoxItem">
+                        <Setter Property="Background" Value="#44475A"/>
+                        <Setter Property="Foreground" Value="White"/>
+                        <Setter Property="Padding" Value="10,8"/>
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ComboBoxItem">
+                                    <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                                        <TextBlock Text="{TemplateBinding Content}" Foreground="White"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsHighlighted" Value="True">
+                                            <Setter Property="Background" Value="#6272A4"/>
+                                        </Trigger>
+                                        <Trigger Property="IsSelected" Value="True">
+                                            <Setter Property="Background" Value="#6272A4"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+    
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        
+        <!-- Header -->
+        <Border Grid.Row="0" Background="#21222C" Padding="20,15">
+            <TextBlock Text="Settings" FontSize="20" FontWeight="Bold" Foreground="#BD93F9"/>
+        </Border>
+        
+        <!-- Content -->
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="20">
+                
+                <!-- General Section -->
+                <TextBlock Text="GENERAL" FontSize="12" Foreground="#6272A4" Margin="0,0,0,10"/>
+                
+                <StackPanel Margin="0,0,0,20">
+                    <TextBlock Text="Subtitle Language" Margin="0,0,0,5"/>
+                    <TextBox x:Name="LanguageTextBox" Text="en" Width="100" HorizontalAlignment="Left"/>
+                    <TextBlock Text="Use ISO 639-1 codes (en, es, fr, de, etc.)" 
+                               FontSize="11" Foreground="#6272A4" Margin="0,5,0,0"/>
+                </StackPanel>
+                
+                <CheckBox x:Name="IgnoreExtrasCheckBox" Content="Ignore Extras folders" 
+                          IsChecked="True" Margin="0,0,0,10"/>
+                <CheckBox x:Name="OverwriteCheckBox" Content="Overwrite existing subtitles" 
+                          Margin="0,0,0,10"/>
+                
+                <!-- Startup Section -->
+                <TextBlock Text="STARTUP" FontSize="12" Foreground="#6272A4" Margin="0,20,0,10"/>
+                
+                <CheckBox x:Name="StartWithWindowsCheckBox" Content="Start with Windows" 
+                          Margin="0,0,0,10"/>
+                <CheckBox x:Name="StartMinimizedCheckBox" Content="Start minimized to tray" 
+                          IsChecked="True" Margin="0,0,0,10"/>
+                
+                <!-- Notifications Section -->
+                <TextBlock Text="NOTIFICATIONS" FontSize="12" Foreground="#6272A4" Margin="0,20,0,10"/>
+                
+                <CheckBox x:Name="NotifySuccessCheckBox" Content="Notify on successful download" 
+                          Margin="0,0,0,10"/>
+                <CheckBox x:Name="NotifyFailureCheckBox" Content="Notify on failed download" 
+                          IsChecked="True" Margin="0,0,0,10"/>
+                
+                <!-- Plex Section -->
+                <TextBlock Text="PLEX INTEGRATION" FontSize="12" Foreground="#6272A4" Margin="0,20,0,10"/>
+                
+                <CheckBox x:Name="PlexEnabledCheckBox" Content="Enable Plex integration" 
+                          Margin="0,0,0,15"/>
+                
+                <StackPanel x:Name="PlexSettings" Margin="20,0,0,0">
+                    <!-- Sign in with Plex button -->
+                    <Button x:Name="SignInPlexButton" Content="🔑 Sign in with Plex" 
+                            Click="SignInPlex_Click" HorizontalAlignment="Left" 
+                            Background="#E5A00D" Foreground="#000000" Margin="0,0,0,15"/>
+                    <TextBlock x:Name="PlexAuthStatus" Text="" FontSize="11" Foreground="#50FA7B" Margin="0,-10,0,15"/>
+                    
+                    <TextBlock Text="Plex Server" Margin="0,0,0,5"/>
+                    <ComboBox x:Name="PlexServerComboBox" Width="300" HorizontalAlignment="Left" Margin="0,0,0,10"
+                              SelectionChanged="PlexServerComboBox_SelectionChanged"
+                              Style="{StaticResource DarkComboBoxStyle}"/>
+                    
+                    <TextBlock Text="Connection" Margin="0,0,0,5"/>
+                    <ComboBox x:Name="PlexConnectionComboBox" Width="500" HorizontalAlignment="Left" Margin="0,0,0,5"
+                              SelectionChanged="PlexConnectionComboBox_SelectionChanged"
+                              Style="{StaticResource DarkComboBoxStyle}"/>
+                    <TextBlock Text="🏠 = Local IP  |  🌐 = Remote/Relay" 
+                               FontSize="11" Foreground="#6272A4" Margin="0,0,0,10"/>
+                    <TextBox x:Name="PlexUrlTextBox" Margin="0,0,0,15"/>
+                    
+                    <TextBlock Text="Plex Token" Margin="0,0,0,5"/>
+                    <TextBox x:Name="PlexTokenTextBox" Margin="0,0,0,5"/>
+                    <TextBlock Text="Auto-filled when you sign in with Plex" 
+                               FontSize="11" Foreground="#6272A4" Margin="0,0,0,15"/>
+                    
+                    <TextBlock Text="Webhook Port" Margin="0,0,0,5"/>
+                    <TextBox x:Name="WebhookPortTextBox" Text="9876" Width="80" HorizontalAlignment="Left" Margin="0,0,0,10"/>
+                    
+                    <CheckBox x:Name="AutoStartWebhookCheckBox" Content="Auto-start webhook server" 
+                              IsChecked="True" Margin="0,0,0,10"/>
+                    
+                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                        <Button Content="Test Connection" Click="TestConnection_Click" Margin="0,0,10,0"/>
+                        <Button Content="Refresh Servers" Click="RefreshServers_Click"/>
+                    </StackPanel>
+                </StackPanel>
+                
+                <!-- OpenSubtitles Section -->
+                <TextBlock Text="OPENSUBTITLES" FontSize="12" Foreground="#6272A4" Margin="0,20,0,10"/>
+                
+                <StackPanel Margin="0,0,0,15">
+                    <TextBlock Text="API Key (required)" Margin="0,0,0,5"/>
+                    <TextBox x:Name="OpenSubtitlesApiKeyTextBox" Margin="0,0,0,5"/>
+                    <TextBlock Text="Get a free API key at opensubtitles.com/consumers" 
+                               FontSize="11" Foreground="#6272A4" Margin="0,0,0,15"/>
+                    
+                    <TextBlock Text="Username (required for downloads)" Margin="0,0,0,5"/>
+                    <TextBox x:Name="OpenSubtitlesUsernameTextBox" Margin="0,0,0,10"/>
+                    
+                    <TextBlock Text="Password" Margin="0,0,0,5"/>
+                    <PasswordBox x:Name="OpenSubtitlesPasswordBox" Background="#44475A" Foreground="#F8F8F2" 
+                                 BorderThickness="0" Padding="8,6" Margin="0,0,0,5"/>
+                    <TextBlock Text="Your opensubtitles.com account credentials" 
+                               FontSize="11" Foreground="#6272A4"/>
+                </StackPanel>
+                
+                <!-- OpenAI Section -->
+                <TextBlock Text="OPENAI (AI-ASSISTED SEARCH)" FontSize="12" Foreground="#6272A4" Margin="0,20,0,10"/>
+                
+                <StackPanel Margin="0,0,0,15">
+                    <TextBlock Text="API Key" Margin="0,0,0,5"/>
+                    <TextBox x:Name="OpenAIApiKeyTextBox" Margin="0,0,0,5"/>
+                    <TextBlock Text="Get an API key at platform.openai.com" 
+                               FontSize="11" Foreground="#6272A4" Margin="0,0,0,15"/>
+                    
+                    <TextBlock Text="Model" Margin="0,0,0,5"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <ComboBox x:Name="OpenAIModelComboBox" Style="{StaticResource DarkComboBoxStyle}" 
+                                  Margin="0,0,10,0"/>
+                        <Button Grid.Column="1" Content="Refresh Models" Click="RefreshOpenAIModels_Click"/>
+                    </Grid>
+                    <TextBlock Text="Click 'Refresh Models' after entering API key" 
+                               FontSize="11" Foreground="#6272A4" Margin="0,5,0,15"/>
+                    
+                    <CheckBox x:Name="EnableAISearchCheckBox" Content="Enable AI-assisted subtitle search" 
+                              IsChecked="True" Margin="0,0,0,5"/>
+                    <TextBlock Text="Uses AI to suggest better search queries when automatic search fails" 
+                               FontSize="11" Foreground="#6272A4"/>
+                </StackPanel>
+                
+            </StackPanel>
+        </ScrollViewer>
+        
+        <!-- Footer -->
+        <Border Grid.Row="2" Background="#21222C" Padding="20,15">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="Cancel" Click="Cancel_Click" Margin="0,0,10,0"/>
+                <Button Content="Save" Click="Save_Click" Background="#BD93F9"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

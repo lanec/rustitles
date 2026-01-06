@@ -1,0 +1,15 @@
+<Application x:Class="WinTitles.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:converters="clr-namespace:WinTitles.App.Converters"
+             ShutdownMode="OnExplicitShutdown">
+    <Application.Resources>
+        <converters:VisibleIfNotZeroConverter x:Key="VisibleIfNotZero"/>
+        <converters:VisibleIfZeroConverter x:Key="VisibleIfZero"/>
+        <converters:VisibleIfNotNullConverter x:Key="VisibleIfNotNull"/>
+        <converters:BoolToColorConverter x:Key="BoolToColor"/>
+        <converters:PlexStatusTextConverter x:Key="PlexStatusText"/>
+        <converters:PlexButtonTextConverter x:Key="PlexButtonText"/>
+        <converters:WorkflowStateToVisibilityConverter x:Key="WorkflowStateToVisibility"/>
+    </Application.Resources>
+</Application>

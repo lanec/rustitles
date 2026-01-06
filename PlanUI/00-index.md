@@ -1,13 +1,39 @@
-# Rustitles .NET Frontend Plan
+# WinTitles Design Plan
 
 ## Summary
 
-This plan outlines a complete reimagining of the Rustitles user interface using a .NET WPF frontend that communicates with the existing Rust backend. The new design prioritizes:
+**WinTitles** is a Windows-native subtitle downloader that serves as a Plex companion app while also working standalone for users with local media files.
 
-1. **System Tray First** - True background operation with always-visible tray icon
-2. **Activity-Centric** - Focus on what's happening, not configuration
-3. **Progressive Disclosure** - Settings hidden until needed
+This plan outlines the complete design and implementation of WinTitles using .NET 8 and WPF. The app prioritizes:
+
+1. **Plex Companion + Standalone** - Works with Plex or independently
+2. **System Tray First** - True background operation with always-visible tray icon
+3. **Activity-Centric** - Focus on what's happening, not configuration
 4. **Windows Native** - Toast notifications, jump lists, proper startup integration
+
+## Project Details
+
+| Field | Value |
+|-------|-------|
+| **Name** | WinTitles |
+| **Tagline** | Your Windows companion for automatic subtitle downloads |
+| **Repository** | `WinTitles/` folder (future: github.com/lanec/wintitles) |
+| **Technology** | .NET 8, WPF, ASP.NET Core |
+| **Platform** | Windows 10/11 only |
+
+## Use Cases
+
+### 🎬 Plex Companion Mode
+- Connect to Plex Media Server
+- Auto-download subtitles when new media is added
+- Scan existing libraries for missing subtitles
+- Background operation via webhooks
+
+### 📁 Standalone Mode
+- Scan any folder for movies/TV shows
+- Drag & drop files or folders
+- One-click subtitle downloads
+- No Plex required
 
 ## Feasibility Assessment
 
@@ -16,19 +42,17 @@ This plan outlines a complete reimagining of the Rustitles user interface using 
 | Aspect | Assessment |
 |--------|------------|
 | **Technical** | .NET WPF is mature, well-documented, excellent tray support |
-| **Communication** | HTTP + SSE is simple, reliable, debuggable |
-| **Effort** | ~6-8 weeks for full implementation |
-| **Maintenance** | Two codebases (Rust + .NET) but clear separation |
+| **Effort** | ~6 weeks for full implementation |
 | **User Benefit** | Significantly improved UX, true background operation |
 
 ### Trade-offs
 
 | Pro | Con |
 |-----|-----|
-| Native Windows feel | Windows-only (Linux/macOS keep egui UI) |
+| Native Windows feel | Windows-only |
 | Full tray support | Larger download size (+~50MB for .NET runtime) |
-| Modern UI frameworks | Two languages to maintain |
-| Better notifications | Requires .NET 8 runtime |
+| Single codebase | Requires .NET 8 runtime |
+| Better notifications | No Linux/macOS support |
 
 ## Documents
 
@@ -41,39 +65,44 @@ This plan outlines a complete reimagining of the Rustitles user interface using 
 | [05-main-window-wireframes.md](05-main-window-wireframes.md) | ASCII wireframes for all UI states |
 | [06-implementation-roadmap.md](06-implementation-roadmap.md) | Phased implementation plan with milestones |
 
-## Quick Start (If Approved)
+## Quick Start
 
-### Phase 1: Proof of Concept (3-4 days)
-1. Create basic .NET WPF project with tray icon
-2. Add HTTP API to Rust backend (`/health`, `/status`, `/activity/stream`)
-3. Connect .NET to Rust, show activity in tray tooltip
-4. Demonstrate: Tray icon updates when Plex detects new media
+### Phase 1: Core Foundation (Week 1)
+1. Set up .NET 8 WPF project with system tray
+2. Implement SubliminalService (Python CLI wrapper)
+3. Basic file scanning
+4. Demonstrate: Tray icon + scan folder + download subtitles
 
-### Decision Point
-After Phase 1 PoC, evaluate:
-- Does the tray integration work smoothly?
-- Is the HTTP communication reliable?
-- Is the development velocity acceptable?
+### Phase 2: Plex Integration (Week 2)
+1. PlexService (API client)
+2. PlexWebhookServer (ASP.NET Core)
+3. Connect to Plex, scan libraries
 
-If yes → Continue to full implementation
-If no → Identify issues and reassess
+### Phase 3: Full UI (Weeks 3-4)
+1. Activity-centric main window
+2. Settings modal
+3. Toast notifications
+
+## Why Pure .NET?
+
+See [07-pure-dotnet-analysis.md](07-pure-dotnet-analysis.md) for the full analysis.
+
+**Summary:** .NET can do everything the Rust version does, with better Windows integration. No need for a hybrid Rust+.NET architecture.
 
 ## Alternatives Considered
 
 | Option | Rejected Because |
 |--------|------------------|
-| Keep egui + tray-icon crate | Dependency conflict with rfd (file dialog) |
-| Electron frontend | Heavy runtime, not native feeling |
-| MAUI | Less mature tray support, more complexity |
-| Pure Win32 tray | Too low-level, poor UI toolkit |
+| Rust + egui | System tray dependency conflicts |
+| Rust backend + .NET frontend | Unnecessary complexity |
+| Electron | Heavy runtime, not native feeling |
+| MAUI | Less mature tray support |
 
 ## Recommendation
 
-**Proceed with .NET WPF frontend.** The benefits significantly outweigh the costs:
+**Build WinTitles as a pure .NET application.** Benefits:
 
-- Solves the system tray problem definitively
-- Enables a much better user experience
-- Clear architecture with HTTP API separation
-- Future-proof (API can support other frontends later)
-
-The Rust backend remains the core - handling all subtitle logic, Plex integration, and downloads. The .NET frontend is purely UI and system integration.
+- Single codebase, single language
+- Native Windows experience (tray, notifications, startup)
+- Plex companion + standalone flexibility
+- ~6 weeks to complete implementation
