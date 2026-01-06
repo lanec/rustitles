@@ -1,15 +1,42 @@
-target/
-rustitles_log.txt
-rustitles_settings.json
-src/subdivx-dl.exe
-AppDir
-appimagetool-x86_64.AppImage
-linuxdeploy-x86_64.AppImage
-AppImageTool
-buildForLinux.sh
+# .NET
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+
+# NuGet
+*.nupkg
+**/packages/*
+!**/packages/build/
+
+# IDE
+.idea/
+*.swp
+*~
+
+# OS
 *.DS_Store
 .DS_Store
+Thumbs.db
 
+# App settings (contains API keys)
+**/settings.json
 
-#Ignore windsurf AI rules
+# Windsurf AI rules
 .windsurfrules
