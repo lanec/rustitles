@@ -2,28 +2,30 @@ using System.IO;
 using System.Windows;
 using System.Windows.Input;
 using WinTitles.Core.Services;
+using WinTitles.Core.Services.Subtitles;
 
 namespace WinTitles.App.Views;
 
 public partial class SubtitleSearchWindow : Window
 {
-    private readonly OpenSubtitlesService _subtitles;
+    private readonly SubtitleAggregator _aggregator;
     private readonly OpenAIService? _openAI;
     private readonly string _videoPath;
     private readonly string _mediaType;
     private List<SubtitleSearchResultViewModel> _results = [];
+    private AggregatedSearchResult? _lastSearchResult;
 
     public string? DownloadedSubtitlePath { get; private set; }
 
     public SubtitleSearchWindow(
-        OpenSubtitlesService subtitles,
+        SubtitleAggregator aggregator,
         OpenAIService? openAI,
         string videoPath,
         string initialQuery,
         string mediaType = "movie")
     {
         InitializeComponent();
-        _subtitles = subtitles ?? throw new ArgumentNullException(nameof(subtitles));
+        _aggregator = aggregator ?? throw new ArgumentNullException(nameof(aggregator));
         _openAI = openAI;
         _videoPath = videoPath ?? "";
         _mediaType = mediaType ?? "movie";
@@ -62,47 +64,58 @@ public partial class SubtitleSearchWindow : Window
             return;
         }
 
-        StatusText.Text = "Searching...";
+        StatusText.Text = "Searching all providers...";
         ResultsList.ItemsSource = null;
         _results.Clear();
 
         try
         {
-            var results = await _subtitles.SearchAsync(query, "en");
+            // Search all providers (OpenSubtitles + Podnapisi)
+            var request = new SubtitleSearchRequest
+            {
+                Query = query,
+                Language = "en",
+                FilePath = _videoPath,
+                MediaType = _mediaType == "show" ? MediaType.Episode : MediaType.Movie
+            };
             
-            if (results.Count == 0)
+            var results = await _aggregator.SearchAllAsync(request);
+            _lastSearchResult = results;
+            
+            if (results.TotalCount == 0)
             {
                 StatusText.Text = "No subtitles found. Try a different search term.";
                 return;
             }
 
-            _results = results.Select(r => new SubtitleSearchResultViewModel
+            _results = results.Results.Select(r => new SubtitleSearchResultViewModel
             {
-                FileId = r.FileId,
+                DownloadId = r.Id,
+                ProviderName = r.ProviderName,
                 FileName = r.FileName ?? "Unknown",
                 Language = r.Language ?? "en",
                 Downloads = r.Downloads,
                 DownloadsFormatted = FormatDownloads(r.Downloads),
                 Format = "srt",
                 HearingImpaired = r.HearingImpaired,
-                Rating = r.Rating
+                Rating = r.MatchScore * 10
             }).ToList();
 
             ResultsList.ItemsSource = _results;
-            StatusText.Text = $"Found {results.Count} subtitles";
+            
+            // Show provider breakdown
+            var providerCounts = results.Results
+                .GroupBy(r => r.ProviderName)
+                .Select(g => $"{g.Key}: {g.Count()}")
+                .ToList();
+            StatusText.Text = $"Found {results.TotalCount} subtitles ({string.Join(", ", providerCounts)})";
         }
         catch (Exception ex)
         {
             var errorMsg = ex.Message;
-            // Clean up HTML error responses
             if (errorMsg.Contains("<!DOCTYPE") || errorMsg.Contains("<html"))
             {
-                if (errorMsg.Contains("503"))
-                    errorMsg = "OpenSubtitles server is temporarily unavailable (503). Try again in a few minutes.";
-                else if (errorMsg.Contains("502"))
-                    errorMsg = "OpenSubtitles server error (502). Try again in a few minutes.";
-                else
-                    errorMsg = "OpenSubtitles server error. Try again later.";
+                errorMsg = "Server error. Try again later.";
             }
             StatusText.Text = $"Search failed: {errorMsg}";
         }
@@ -160,19 +173,30 @@ public partial class SubtitleSearchWindow : Window
     private async void Download_Click(object sender, RoutedEventArgs e)
     {
         var selected = ResultsList.SelectedItem as SubtitleSearchResultViewModel;
-        if (selected == null) return;
+        if (selected == null || _lastSearchResult == null) return;
 
-        StatusText.Text = "Downloading subtitle...";
+        StatusText.Text = $"Downloading from {selected.ProviderName}...";
         DownloadButton.IsEnabled = false;
 
         try
         {
+            // Find the original search result to get provider info
+            var subtitleResult = _lastSearchResult.Results
+                .FirstOrDefault(r => r.Id == selected.DownloadId && r.ProviderName == selected.ProviderName);
+            
+            if (subtitleResult == null)
+            {
+                StatusText.Text = "Error: Could not find subtitle info. Please search again.";
+                DownloadButton.IsEnabled = true;
+                return;
+            }
+
             // Generate destination path in same folder as video
             var dir = Path.GetDirectoryName(_videoPath) ?? ".";
             var baseName = Path.GetFileNameWithoutExtension(_videoPath);
             var destPath = Path.Combine(dir, $"{baseName}.en.srt");
 
-            var result = await _subtitles.DownloadAsync(selected.FileId, destPath);
+            var result = await _aggregator.DownloadAsync(subtitleResult, destPath);
 
             if (result.Success)
             {
@@ -237,7 +261,8 @@ public partial class SubtitleSearchWindow : Window
 
 public class SubtitleSearchResultViewModel
 {
-    public int FileId { get; set; }
+    public string DownloadId { get; set; } = "";
+    public string ProviderName { get; set; } = "";
     public string FileName { get; set; } = "";
     public string Language { get; set; } = "";
     public int Downloads { get; set; }
@@ -251,6 +276,7 @@ public class SubtitleSearchResultViewModel
         get
         {
             var parts = new List<string> { Language, Format };
+            if (!string.IsNullOrEmpty(ProviderName)) parts.Add($"[{ProviderName}]");
             if (HearingImpaired) parts.Add("👂 HI");
             if (Rating > 0) parts.Add($"★ {Rating:F1}");
             return string.Join(" • ", parts.Where(p => !string.IsNullOrEmpty(p)));

@@ -187,7 +187,7 @@ public class DownloadManager : IDisposable
                 job.Status = DownloadStatus.Downloading;
                 OnJobUpdated?.Invoke(job);
 
-                SubtitleDownloadResult result;
+                OpenSubtitlesDownloadResult result;
                 
                 // Use metadata-based search if we have metadata (more accurate)
                 if (!string.IsNullOrEmpty(job.Title))

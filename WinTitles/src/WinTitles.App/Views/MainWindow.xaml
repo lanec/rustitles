@@ -73,48 +73,6 @@
             </Grid>
         </Border>
         
-        <!-- Progress Section -->
-        <Border Grid.Row="1" Background="#44475A" Padding="20" Visibility="{Binding TotalJobs, Converter={StaticResource VisibleIfNotZero}}">
-            <StackPanel>
-                <Grid>
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*"/>
-                        <ColumnDefinition Width="Auto"/>
-                    </Grid.ColumnDefinitions>
-                    
-                    <StackPanel Grid.Column="0">
-                        <TextBlock Foreground="#F8F8F2" FontSize="14">
-                            <Run Text="Downloading: "/>
-                            <Run Text="{Binding CompletedJobs, Mode=OneWay}"/>
-                            <Run Text=" of "/>
-                            <Run Text="{Binding TotalJobs, Mode=OneWay}"/>
-                        </TextBlock>
-                        <TextBlock Text="{Binding CurrentItem}" Foreground="#6272A4" Margin="0,5,0,0"/>
-                    </StackPanel>
-                    
-                    <StackPanel Grid.Column="1" Orientation="Horizontal">
-                        <Button Command="{Binding PauseDownloadsCommand}" Margin="0,0,10,0">
-                            <Button.Style>
-                                <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-                                    <Setter Property="Content" Value="⏸ Pause"/>
-                                    <Style.Triggers>
-                                        <DataTrigger Binding="{Binding IsPaused}" Value="True">
-                                            <Setter Property="Content" Value="▶ Resume"/>
-                                        </DataTrigger>
-                                    </Style.Triggers>
-                                </Style>
-                            </Button.Style>
-                        </Button>
-                        <Button Content="↻ Retry Failed" Command="{Binding RetryFailedCommand}" 
-                                Visibility="{Binding FailedJobs, Converter={StaticResource VisibleIfNotZero}}"/>
-                    </StackPanel>
-                </Grid>
-                
-                <ProgressBar Value="{Binding Progress}" Minimum="0" Maximum="100" Height="8" 
-                             Margin="0,15,0,0" Background="#21222C" Foreground="#BD93F9"/>
-            </StackPanel>
-        </Border>
-        
         <!-- Main Content - State-aware -->
         <Grid Grid.Row="2" Margin="20">
             

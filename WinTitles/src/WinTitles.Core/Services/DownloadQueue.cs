@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
 using WinTitles.Core.Models;
+using WinTitles.Core.Services.Subtitles;
 
 namespace WinTitles.Core.Services;
 
@@ -11,6 +12,7 @@ namespace WinTitles.Core.Services;
 public class DownloadQueue : IDisposable
 {
     private readonly OpenSubtitlesService _subtitles;
+    private readonly SubtitleAggregator? _aggregator;
     private readonly DatabaseService _database;
     private readonly SettingsService _settings;
     private readonly ILogger<DownloadQueue> _logger;
@@ -52,13 +54,21 @@ public class DownloadQueue : IDisposable
     public event Action<QueueItem>? OnItemCompleted;
     public event Action<QueueState>? OnStateChanged;
     
+    /// <summary>
+    /// Callback for when user input is needed (e.g., title confirmation).
+    /// Returns the corrected title info, or null to skip the item.
+    /// </summary>
+    public Func<QueueItem, SmartSearchResult, Task<UserTitleInput?>>? OnUserInputNeeded;
+    
     public DownloadQueue(
         OpenSubtitlesService subtitles,
+        SubtitleAggregator? aggregator,
         DatabaseService database,
         SettingsService settings,
         ILogger<DownloadQueue> logger)
     {
         _subtitles = subtitles;
+        _aggregator = aggregator;
         _database = database;
         _settings = settings;
         _logger = logger;
@@ -319,12 +329,13 @@ public class DownloadQueue : IDisposable
         
         while (!ct.IsCancellationRequested)
         {
-            // Wait if paused (with cancellation check)
-            try
+            // Wait if paused (with cancellation check) - use async-friendly approach
+            while (!_pauseEvent.IsSet && !ct.IsCancellationRequested)
             {
-                _pauseEvent.Wait(ct);
+                await Task.Delay(100, ct).ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            
+            if (ct.IsCancellationRequested)
             {
                 break;
             }
@@ -381,7 +392,7 @@ public class DownloadQueue : IDisposable
     }
     
     /// <summary>
-    /// Process a single item.
+    /// Process a single item using multi-provider aggregator with AI fallback.
     /// </summary>
     private async Task ProcessItemAsync(QueueItem item, CancellationToken ct)
     {
@@ -390,33 +401,54 @@ public class DownloadQueue : IDisposable
         item.StartedAt = DateTime.UtcNow;
         
         _logger.LogDebug("Starting download for {Title}", item.DisplayName);
+        _logger.LogInformation("Aggregator available: {Available}", _aggregator != null);
         
         try
         {
             var scanned = item.ScannedItem;
+            SubtitleDownloadResult downloadResult;
             
-            var result = await _subtitles.DownloadWithMetadataAsync(
-                scanned.FilePath,
-                scanned.Title,
-                item.Language,
-                scanned.Year,
-                scanned.ShowTitle,
-                scanned.Season,
-                scanned.Episode,
-                ct);
+            // Use aggregator for multi-provider search (includes OpenSubtitles + Podnapisi)
+            if (_aggregator != null)
+            {
+                _logger.LogInformation("Using multi-provider aggregator for {Title}", item.DisplayName);
+                downloadResult = await ProcessWithAggregatorAsync(item, scanned, ct) 
+                    ?? new SubtitleDownloadResult { Success = false, Error = "No subtitles found from any provider" };
+            }
+            else
+            {
+                // Fallback to direct OpenSubtitles only if aggregator not available
+                var osResult = await _subtitles.DownloadWithMetadataAsync(
+                    scanned.FilePath,
+                    scanned.Title,
+                    item.Language,
+                    scanned.Year,
+                    scanned.ShowTitle,
+                    scanned.Season,
+                    scanned.Episode,
+                    ct);
+                
+                downloadResult = new SubtitleDownloadResult
+                {
+                    Success = osResult.Success,
+                    FilePath = osResult.FilePath,
+                    Error = osResult.Error,
+                    RemainingDownloads = osResult.RemainingDownloads
+                };
+            }
             
             item.CompletedAt = DateTime.UtcNow;
             
-            if (result.Success)
+            if (downloadResult.Success)
             {
                 item.Status = DownloadStatus.Success;
-                item.SubtitlePath = result.FilePath;
+                item.SubtitlePath = downloadResult.FilePath;
                 _logger.LogInformation("Downloaded subtitle for {Title}", item.DisplayName);
             }
             else
             {
                 item.Status = DownloadStatus.Failed;
-                item.Error = result.Error ?? "Unknown error";
+                item.Error = downloadResult.Error ?? "Unknown error";
                 _logger.LogWarning("Failed to download subtitle for {Title}: {Error}", 
                     item.DisplayName, item.Error);
             }
@@ -463,6 +495,72 @@ public class DownloadQueue : IDisposable
             
             _workerSemaphore.Release();
         }
+    }
+    
+    /// <summary>
+    /// Process an item using the multi-provider aggregator.
+    /// Uses fallback download - tries each provider until one succeeds.
+    /// Does NOT block on user input - marks for later review instead.
+    /// </summary>
+    private async Task<SubtitleDownloadResult?> ProcessWithAggregatorAsync(
+        QueueItem item, 
+        ScannedItem scanned, 
+        CancellationToken ct)
+    {
+        if (_aggregator == null) return null;
+        
+        // Build search request with all available metadata
+        var request = new SubtitleSearchRequest
+        {
+            Query = scanned.Title,
+            Language = item.Language,
+            FilePath = scanned.FilePath,
+            Year = scanned.Year,
+            Season = scanned.Season,
+            Episode = scanned.Episode,
+            MediaType = scanned.Season.HasValue ? Subtitles.MediaType.Episode : Subtitles.MediaType.Movie
+        };
+        
+        _logger.LogInformation("Searching all providers for: {Title}", scanned.Title);
+        
+        // Search all providers - don't use SmartSearch to avoid AI delays
+        var searchResult = await _aggregator.SearchAllAsync(request, ct);
+        
+        // If no results, try hash-based search as fallback
+        if (searchResult.TotalCount == 0 && !string.IsNullOrEmpty(scanned.FilePath))
+        {
+            _logger.LogDebug("No text results, trying filename-based search for: {File}", 
+                Path.GetFileName(scanned.FilePath));
+            
+            var fileName = Path.GetFileNameWithoutExtension(scanned.FilePath);
+            request = new SubtitleSearchRequest
+            {
+                Query = fileName,
+                Language = item.Language,
+                FilePath = scanned.FilePath
+            };
+            
+            searchResult = await _aggregator.SearchAllAsync(request, ct);
+        }
+        
+        // If still no results, mark for later review (don't block queue)
+        if (searchResult.TotalCount == 0)
+        {
+            _logger.LogWarning("No subtitles found for {Title} from any provider", item.DisplayName);
+            return new SubtitleDownloadResult
+            {
+                Success = false,
+                Error = "No subtitles found from any provider"
+            };
+        }
+        
+        // Generate destination path
+        var dir = Path.GetDirectoryName(scanned.FilePath) ?? ".";
+        var baseName = Path.GetFileNameWithoutExtension(scanned.FilePath);
+        var destPath = Path.Combine(dir, $"{baseName}.{item.Language}.srt");
+        
+        // Download with fallback - tries each provider until one succeeds
+        return await _aggregator.DownloadWithFallbackAsync(searchResult, destPath, ct);
     }
     
     /// <summary>
@@ -525,4 +623,15 @@ public class DownloadQueue : IDisposable
         _progressTimer.Dispose();
         _workerSemaphore?.Dispose();
     }
+}
+
+/// <summary>
+/// User-provided title information for retry search.
+/// </summary>
+public class UserTitleInput
+{
+    public required string Title { get; init; }
+    public int? Year { get; init; }
+    public int? Season { get; init; }
+    public int? Episode { get; init; }
 }

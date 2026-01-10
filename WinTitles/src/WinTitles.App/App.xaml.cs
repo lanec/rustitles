@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using WinTitles.App.ViewModels;
 using WinTitles.App.Views;
 using WinTitles.Core.Services;
+using WinTitles.Core.Services.Subtitles;
 
 namespace WinTitles.App;
 
@@ -45,12 +46,10 @@ public partial class App : Application
 
         // Core services
         services.AddSingleton<SubliminalService>();
-        services.AddSingleton<OpenSubtitlesService>();
         services.AddSingleton<FileScanner>();
         services.AddSingleton<DatabaseService>();
         services.AddSingleton<DownloadManager>();
         services.AddSingleton<ScanService>();
-        services.AddSingleton<DownloadQueue>();
         services.AddSingleton<SettingsService>();
         services.AddSingleton<PlexService>();
         services.AddSingleton<PlexAuthService>();
@@ -60,6 +59,18 @@ public partial class App : Application
         services.AddHttpClient<PlexAuthService>();
         services.AddHttpClient<OpenSubtitlesService>();
         services.AddHttpClient<OpenAIService>();
+        services.AddHttpClient<PodnapisiService>();
+        
+        // Subtitle providers (multi-provider aggregation like Subliminal)
+        // Must be registered BEFORE DownloadQueue so DI can inject the aggregator
+        services.AddSingleton<OpenSubtitlesService>();
+        services.AddSingleton<PodnapisiService>();
+        services.AddSingleton<ISubtitleProvider, OpenSubtitlesProvider>();
+        services.AddSingleton<ISubtitleProvider, PodnapisiProvider>();
+        services.AddSingleton<SubtitleAggregator>();
+        
+        // DownloadQueue depends on SubtitleAggregator - register after
+        services.AddSingleton<DownloadQueue>();
 
         // ViewModels
         services.AddSingleton<MainViewModel>();

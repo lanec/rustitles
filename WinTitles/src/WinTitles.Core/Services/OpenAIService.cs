@@ -65,6 +65,58 @@ public class OpenAIService
     }
     
     /// <summary>
+    /// Simple completion API for general prompts.
+    /// </summary>
+    public async Task<string?> GetCompletionAsync(string prompt, CancellationToken ct = default)
+    {
+        var apiKey = _settings.Settings.OpenAI.ApiKey;
+        var model = _settings.Settings.OpenAI.SelectedModel;
+        
+        if (string.IsNullOrEmpty(apiKey))
+        {
+            return null;
+        }
+        
+        // Default to gpt-4o-mini if no model selected
+        if (string.IsNullOrEmpty(model))
+        {
+            model = "gpt-4o-mini";
+        }
+        
+        try
+        {
+            var requestBody = new
+            {
+                model = model,
+                messages = new[]
+                {
+                    new { role = "user", content = prompt }
+                },
+                temperature = 0.3,
+                max_tokens = 1000
+            };
+            
+            var request = new HttpRequestMessage(HttpMethod.Post, $"{BaseUrl}/chat/completions");
+            request.Headers.Add("Authorization", $"Bearer {apiKey}");
+            request.Content = new StringContent(
+                JsonSerializer.Serialize(requestBody),
+                Encoding.UTF8,
+                "application/json");
+            
+            var response = await _http.SendAsync(request, ct);
+            response.EnsureSuccessStatusCode();
+            
+            var result = await response.Content.ReadFromJsonAsync<OpenAIChatResponse>(ct);
+            return result?.Choices?.FirstOrDefault()?.Message?.Content;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "OpenAI completion failed");
+            return null;
+        }
+    }
+    
+    /// <summary>
     /// Generate a search query for OpenSubtitles based on file information.
     /// </summary>
     public async Task<SubtitleSearchSuggestion> GenerateSearchQueryAsync(
@@ -78,7 +130,14 @@ public class OpenAIService
         
         if (string.IsNullOrEmpty(apiKey))
         {
-            return new SubtitleSearchSuggestion { Error = "OpenAI API key not configured" };
+            return new SubtitleSearchSuggestion { Error = "OpenAI API key not configured. Go to Settings > AI Settings." };
+        }
+        
+        // Default to gpt-4o-mini if no model selected
+        if (string.IsNullOrEmpty(model))
+        {
+            model = "gpt-4o-mini";
+            _logger.LogWarning("No OpenAI model selected, defaulting to {Model}", model);
         }
         
         // Extract folder name from path

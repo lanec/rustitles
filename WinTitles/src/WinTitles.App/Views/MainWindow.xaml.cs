@@ -4,6 +4,7 @@ using System.Windows.Controls;
 using Microsoft.Extensions.DependencyInjection;
 using WinTitles.App.ViewModels;
 using WinTitles.Core.Services;
+using WinTitles.Core.Services.Subtitles;
 
 namespace WinTitles.App.Views;
 
@@ -163,7 +164,7 @@ public partial class MainWindow : Window
                 return;
             }
             
-            var subtitlesService = _serviceProvider.GetRequiredService<OpenSubtitlesService>();
+            var aggregator = _serviceProvider.GetRequiredService<SubtitleAggregator>();
             var openAIService = _serviceProvider.GetService<OpenAIService>(); // Use GetService to allow null
             
             var initialQuery = Path.GetFileNameWithoutExtension(item.FilePath) ?? "";
@@ -173,7 +174,7 @@ public partial class MainWindow : Window
             var mediaType = item.Item?.Type.ToString().ToLower() ?? "movie";
             
             var searchWindow = new SubtitleSearchWindow(
-                subtitlesService, 
+                aggregator, 
                 openAIService, 
                 item.FilePath, 
                 initialQuery,
@@ -476,12 +477,12 @@ public partial class MainWindow : Window
     {
         try
         {
-            var subtitlesService = _serviceProvider.GetRequiredService<OpenSubtitlesService>();
+            var aggregator = _serviceProvider.GetRequiredService<SubtitleAggregator>();
             var openAIService = _serviceProvider.GetService<OpenAIService>();
             var mediaType = item.Item?.Type.ToString().ToLower() ?? "movie";
             
             var searchWindow = new SubtitleSearchWindow(
-                subtitlesService, 
+                aggregator, 
                 openAIService, 
                 item.FilePath, 
                 query,

@@ -6,6 +6,8 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Win32;
 using WinTitles.Core.Models;
 using WinTitles.Core.Services;
+using WinTitles.Core.Services.Subtitles;
+using WinTitles.App.Views;
 
 namespace WinTitles.App.ViewModels;
 
@@ -90,6 +92,7 @@ public partial class MainViewModel : ObservableObject
         _downloadQueue.OnProgress += OnQueueProgress;
         _downloadQueue.OnItemCompleted += OnQueueItemCompleted;
         _downloadQueue.OnStateChanged += OnQueueStateChanged;
+        _downloadQueue.OnUserInputNeeded = OnUserTitleInputNeeded;
 
         // Subscribe to webhook events
         _webhookServer.OnMediaAdded += OnPlexMediaAdded;
@@ -118,7 +121,7 @@ public partial class MainViewModel : ObservableObject
                         SubtitlePath = item.SubtitlePath,
                         Error = item.Error,
                         Source = item.Source,
-                        MediaType = MediaType.Movie
+                        MediaType = WinTitles.Core.Models.MediaType.Movie
                     }));
                 }
 
@@ -655,6 +658,54 @@ public partial class MainViewModel : ObservableObject
         {
             _logger.LogError(ex, "Error processing Plex webhook for {Title}", evt.Title);
         }
+    }
+
+    /// <summary>
+    /// Called when the download queue needs user input to confirm a title.
+    /// Shows the TitleConfirmationWindow dialog.
+    /// </summary>
+    private async Task<UserTitleInput?> OnUserTitleInputNeeded(QueueItem item, SmartSearchResult searchResult)
+    {
+        return await Application.Current.Dispatcher.InvokeAsync(() =>
+        {
+            var fileName = System.IO.Path.GetFileNameWithoutExtension(item.ScannedItem.FilePath);
+            var parsedInfo = new MediaInfo
+            {
+                OriginalName = fileName,
+                CleanTitle = item.ScannedItem.Title,
+                Year = item.ScannedItem.Year,
+                Season = item.ScannedItem.Season,
+                Episode = item.ScannedItem.Episode,
+                Type = item.ScannedItem.Season.HasValue 
+                    ? WinTitles.Core.Services.Subtitles.MediaType.Episode 
+                    : WinTitles.Core.Services.Subtitles.MediaType.Movie
+            };
+
+            var dialog = new TitleConfirmationWindow(
+                fileName,
+                searchResult.AiSuggestions,
+                parsedInfo)
+            {
+                Owner = Application.Current.MainWindow
+            };
+
+            var result = dialog.ShowDialog();
+
+            if (result == true && !dialog.WasSkipped && !string.IsNullOrEmpty(dialog.ConfirmedTitle))
+            {
+                _logger.LogInformation("User confirmed title: {Title}", dialog.ConfirmedTitle);
+                return new UserTitleInput
+                {
+                    Title = dialog.ConfirmedTitle,
+                    Year = dialog.ConfirmedYear,
+                    Season = dialog.ConfirmedSeason,
+                    Episode = dialog.ConfirmedEpisode
+                };
+            }
+
+            _logger.LogInformation("User skipped title confirmation for {Item}", item.DisplayName);
+            return null;
+        });
     }
 }
 
